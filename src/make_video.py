@@ -273,6 +273,32 @@ def cut_clip(src: Path, start_sec: float, end_sec: float, dest: Path) -> Path:
     return dest
 
 
+def render_bg(clip_path: Path, total_duration: float, dest: Path) -> Path:
+    """clip.mp4 を total_duration 秒の bg.mp4 に整形する (必要ならループ繰り返し)。
+
+    ffmpeg の `-stream_loop -1 -ss OFFSET` の組み合わせは挙動が不安定 (バージョン
+    によって offset がループ毎に再適用される/されないが揺れる) なので、
+    総尺ぶんを 1 回だけ事前レンダリングして「単純な seek 可能な bg」に変換する。
+    各シーンの compose_scene はこの bg.mp4 に対して `-ss offset` だけで seek できる。
+    """
+    print(f"[make] bg レンダリング: clip → {dest} (total_duration={total_duration:.2f}s)")
+    run(
+        [
+            "ffmpeg", "-y",
+            "-stream_loop", "-1",       # clip を必要なだけループ
+            "-i", str(clip_path),
+            "-t", f"{total_duration:.3f}",  # 総尺で打ち切り
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+            "-pix_fmt", "yuv420p",
+            "-an",                        # 音声なし
+            "-r", str(FPS),
+            str(dest),
+        ],
+        desc=f"bg → {dest}",
+    )
+    return dest
+
+
 def voicevox_synthesize(text: str, speaker_id: int, dest: Path) -> Path:
     """VOICEVOX HTTP API で音声合成する。"""
     print(f"[make] VOICEVOX 合成 speaker={speaker_id}: {text[:30]}")
@@ -411,8 +437,9 @@ def compose_scene(
     run(
         [
             "ffmpeg", "-y",
-            # input 0: ベース動画 (clip_offset 秒目から開始、必要時はループ)
-            "-stream_loop", "-1",
+            # input 0: 事前レンダリング済み bg.mp4 (総尺ぶん既にループ済み)。
+            # ここでは -ss で offset 秒目に seek するだけ。-stream_loop は使わない
+            # (ffmpeg の `-stream_loop -1 -ss N` は挙動不安定なため避ける)。
             "-ss", f"{clip_offset:.3f}",
             "-i", str(clip_path),
             # input 1: VOICEVOX 音声
@@ -530,21 +557,11 @@ def main() -> int:
         print(f"[make] FATAL: clip 切り出し失敗: {exc}")
         return 3
 
-    # 3, 4. シーンごとに VOICEVOX 合成 + 完成シーン動画生成
-    # クリップの累積 offset を追跡することで、シーン間でクリップが連続して再生される。
-    # クリップ尺を超えた offset は modulo で巻き戻し、ffmpeg の -stream_loop -1 が
-    # 自動的に先頭からループしてくれる。
-    try:
-        clip_actual_duration = ffprobe_duration(clip_path)
-    except Exception as exc:
-        print(f"[make] WARNING: clip duration 取得失敗 ({exc})。offset=0 で続行。")
-        clip_actual_duration = 0.0
-    cumulative_offset = 0.0
-
-    scene_videos: list[Path] = []
+    # 3. 全シーンの VOICEVOX 合成 (第1ループ)
+    # 各シーンの音声 wav と継続時間を先に全部確定させ、合計 = 総尺を計算する。
+    scene_data: list[dict[str, Any]] = []
     for i, sc in enumerate(script["scenes"]):
         speaker = sc["speaker"]
-        # 立ち絵廃止後 emotion は使われない (VOICEVOX speaker_id にも影響しない)
         # Gemini が稀に \n / 実改行 / \r を text に混入することがある。
         # VOICEVOX (発音される) と drawtext (filter parser エラーになる) の両方を
         # 壊すので、ここで一括除去してから両者に同じ文字列を渡す。
@@ -573,40 +590,56 @@ def main() -> int:
             return 6
         duration += 0.3  # 末尾余韻
 
-        # クリップ内 offset を modulo で巻き戻す (-stream_loop -1 と組み合わせて
-        # クリップが総尺より短い場合は先頭から自然にループ継続する)
-        if clip_actual_duration > 0:
-            scene_clip_offset = cumulative_offset % clip_actual_duration
-        else:
-            scene_clip_offset = 0.0
+        scene_data.append({
+            "speaker": speaker,
+            "text": text,
+            "audio_path": audio_path,
+            "duration": duration,
+        })
 
+    total_scene_duration = sum(s["duration"] for s in scene_data)
+    print(f"[make] 全シーン synth 完了: {len(scene_data)} シーン、合計 {total_scene_duration:.2f}s")
+
+    # 4. bg.mp4 を総尺ぶん事前レンダリング (clip がループしてもこれで一発化)
+    bg_path = WORK_DIR / "bg.mp4"
+    try:
+        render_bg(clip_path, total_scene_duration, bg_path)
+    except Exception as exc:
+        print(f"[make] FATAL: bg レンダリング失敗: {exc}")
+        return 7
+    print(f"[make] bg dim={ffprobe_dim(bg_path)}")
+
+    # 5. 各シーンを compose (第2ループ、bg.mp4 を offset で seek)
+    cumulative_offset = 0.0
+    scene_videos: list[Path] = []
+    for i, s in enumerate(scene_data):
         scene_video = scenes_dir / f"scene_{i:02d}.mp4"
         try:
             compose_scene(
-                clip_path=clip_path,
-                speaker=speaker,
-                text=text,
-                audio_path=audio_path,
-                duration=duration,
+                clip_path=bg_path,         # bg.mp4 を渡す (clip ではなく)
+                speaker=s["speaker"],
+                text=s["text"],
+                audio_path=s["audio_path"],
+                duration=s["duration"],
                 dest=scene_video,
                 font_path=font_path,
                 text_dir=scenes_dir,
                 scene_index=i,
-                clip_offset=scene_clip_offset,
+                clip_offset=cumulative_offset,
             )
         except Exception as exc:
             print(f"[make] FATAL: scene[{i}] 描画失敗: {exc}")
-            return 7
+            return 8
         scene_videos.append(scene_video)
-        cumulative_offset += duration
+        cumulative_offset += s["duration"]
 
-    # 5. concat
+    # 6. concat
     presentation_path = WORK_DIR / "presentation.mp4"
     try:
         concat_scenes(scene_videos, presentation_path)
     except Exception as exc:
         print(f"[make] FATAL: concat 失敗: {exc}")
-        return 8
+        return 9
 
     total_duration = ffprobe_duration(presentation_path)
     print(f"[make] 総再生時間: {total_duration:.2f}s")
