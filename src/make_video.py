@@ -246,19 +246,10 @@ def cut_clip(src: Path, start_sec: float, end_sec: float, dest: Path) -> Path:
         raise RuntimeError(f"clip 長さ {duration:.2f}s が短すぎる (元動画が短い可能性)")
 
     print(f"[make] clip 切り出し: {start_sec}s - {end_sec}s ({duration}s)")
-    # ぼかし背景 + 中央フィット (TikTok/Shorts 定番):
-    # 1. split で元動画を 2 系統に分岐
-    # 2. bg: cover-crop で 1080x1920 に拡大 + gblur (背景レイヤー)
-    # 3. fg: 元アスペクト比のまま 1080x1920 に decrease で fit
-    # 4. bgblur に fgfit を中央 overlay
-    # → 画面全体がぼかし背景で埋まり、元動画は全体が見切れず中央に表示される
-    filter_complex = (
-        f"[0:v]split=2[bg][fg];"
-        f"[bg]scale={W}:{H}:force_original_aspect_ratio=increase,"
-        f"crop={W}:{H},gblur=sigma=20[bgblur];"
-        f"[fg]scale={W}:{H}:force_original_aspect_ratio=decrease[fgfit];"
-        f"[bgblur][fgfit]overlay=(W-w)/2:(H-h)/2,"
-        f"setsar=1,fps={FPS}[out]"
+    # 最小構成: 画面サイズに引き伸ばす (アスペクト比は変わるが見切れなし)
+    vf = (
+        f"scale={W}:{H},"
+        f"setsar=1,fps={FPS}"
     )
     run(
         [
@@ -267,8 +258,7 @@ def cut_clip(src: Path, start_sec: float, end_sec: float, dest: Path) -> Path:
             "-i", str(src),
             "-t", str(duration),
             "-an",
-            "-filter_complex", filter_complex,
-            "-map", "[out]",
+            "-vf", vf,
             "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
             "-pix_fmt", "yuv420p",
             str(dest),
