@@ -1,19 +1,19 @@
-"""動画を合成する。
+"""動画を合成する (フルスクリーン動画 + 立ち絵オーバーレイ方式)。
 
 work/script.json (generate_script.py 出力) を入力に:
 1. media_url (各 API の MP4 直リンク) を requests ストリームでダウンロード
-2. clip 区間 (start_sec, end_sec) を 1080x960 / 元音声カットで切り出し
-   実動画長より end_sec が大きければ自動で丸める
+2. clip 区間 (start_sec, end_sec) を 1080x1920 (フルスクリーン縦) で切り出し
+   元音声はカット。実動画長より end_sec が大きければ自動で丸める。
+   start_sec≈0 で動画が要求の 2.5 倍以上長い場合はランダム中盤切出し。
 3. シーンごとに VOICEVOX で音声合成
-4. シーンごとの下半分 (立ち絵 + 字幕) 動画を生成
-5. 全シーンを concat → 1080x960 の下半分動画を作成
-6. 上半分 (元動画クリップをループ) と下半分を vstack
-7. assets/bgm.mp3 を -12dB で mix
-8. output.mp4 を出力 (1080x1920 縦動画)
+4. シーンごとに 1080x1920 の完成動画 (clip ループ + 立ち絵 + 字幕帯 + 音声) を生成
+   - 話者が nyanko なら立ち絵を右下、zundamon なら左下に配置
+   - 立ち絵は scale=400:-1、底辺を字幕帯の上端 (y=1490) に揃える
+   - 字幕帯は y=1500..1920 の半透明黒 (alpha 0.6) + 中央配置 56pt 白文字
+5. 全シーンを concat → presentation.mp4
+6. assets/bgm.mp3 を -12dB で mix → output.mp4
 
-レイアウト:
-  上半分 (y=0..960)   : 元動画クリップ
-  下半分 (y=960..1920): 立ち絵中央 + 字幕 (画面下部)
+立ち絵 PNG が無い場合はエラーで停止する (placeholder 自動生成は廃止)。
 """
 
 from __future__ import annotations
@@ -48,13 +48,23 @@ DOWNLOAD_CHUNK = 1024 * 1024  # 1 MiB
 # 出力動画スペック
 W = 1080
 H = 1920
-HALF_H = H // 2  # 960
 FPS = 30
 
-# 字幕レイアウト
-SUBTITLE_FONTSIZE = 44
-SUBTITLE_WRAP_CHARS = 18  # 1 行あたり最大文字数
-SUBTITLE_LINE_SPACING = 12
+# レイアウト定数
+# - 立ち絵: scale=CHAR_W:-1 (アスペクト比維持)、画面端から CHAR_MARGIN_X
+#           底辺 y=CHAR_BOTTOM_Y (字幕帯の上端 1500 - 余白 10)
+# - 字幕帯: y=SUBTITLE_BAND_Y..H、半透明黒 (SUBTITLE_BAND_ALPHA)
+# - 字幕文字: 帯の縦中央、白文字 + 黒縁
+CHAR_W = 400
+CHAR_MARGIN_X = 40
+CHAR_BOTTOM_Y = 1490  # 立ち絵の底辺の y 座標 (字幕帯上端より 10px 上)
+SUBTITLE_BAND_Y = 1500
+SUBTITLE_BAND_H = 420
+SUBTITLE_BAND_ALPHA = 0.6
+SUBTITLE_FONTSIZE = 56
+SUBTITLE_WRAP_CHARS = 18  # 1 行あたり最大文字数 (fontsize 56 で 1080px に収まる)
+SUBTITLE_LINE_SPACING = 14
+SUBTITLE_BORDERW = 4
 
 # キャラ → VOICEVOX speaker_id
 SPEAKER_IDS = {
@@ -62,10 +72,13 @@ SPEAKER_IDS = {
     "nyanko": 13,  # 青山龍星
 }
 
-# ffmpeg 色指定 (lavfi color source は 0xRRGGBB を確実に解釈)
-BG_COLOR = "0x1a1a2e"
+# 話者ごとの立ち絵配置 (right=右下、left=左下)
+SPEAKER_POSITIONS = {
+    "nyanko": "right",
+    "zundamon": "left",
+}
 
-# 日本語フォントの探索候補 (FONT_PATH env が無効なら順に探す)
+# 日本語フォントの探索候補
 FONT_CANDIDATES = [
     "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc",
     "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
@@ -80,11 +93,7 @@ FONT_CANDIDATES = [
 
 
 def resolve_font_path() -> str:
-    """日本語フォントの実体パスを解決する。
-
-    FONT_PATH env が指す実ファイルが存在すればそれを使用、
-    存在しなければ FONT_CANDIDATES を順に探索する。
-    """
+    """日本語フォントの実体パスを解決する。"""
     env_path = os.environ.get("FONT_PATH", "").strip()
     if env_path and Path(env_path).is_file():
         print(f"[make] フォント (env): {env_path}")
@@ -135,11 +144,7 @@ def ffprobe_duration(path: Path) -> float:
 
 
 def download_video(url: str, dest: Path) -> Path:
-    """media_url (公式 API の MP4 直リンク) を requests ストリームで保存する。
-
-    Pixabay / Pexels / NASA / Internet Archive / USGS のいずれも
-    cookies なし & 認証なしの直リンクを返すので yt-dlp は不要。
-    """
+    """media_url を requests ストリームで保存する。"""
     print(f"[make] HTTP ダウンロード: {url}")
     dest.parent.mkdir(parents=True, exist_ok=True)
     try:
@@ -168,13 +173,12 @@ def download_video(url: str, dest: Path) -> Path:
 
 
 def cut_clip(src: Path, start_sec: float, end_sec: float, dest: Path) -> Path:
-    """元動画から指定区間を 1080x960 / 元音声カットで切り出す。
+    """元動画から指定区間を 1080x1920 (フルスクリーン縦) / 元音声カットで切り出す。
 
-    実動画長を ffprobe で取得し:
     - end_sec が動画長を超えていれば丸める
-    - start_sec がほぼ 0 で動画が要求より十分長い場合、中盤からランダム切り出し
-      (NASA slow-motion 系は冒頭が静止しがちなので variety を確保)
+    - start_sec≈0 で動画が要求の 2.5 倍以上長い場合は中盤からランダム切出し
     - 結果クリップが極端に短い場合 (< 3 s) はエラー
+    - 横長ソースは center crop で 1080x1920 に fit
     """
     try:
         actual_duration = ffprobe_duration(src)
@@ -184,15 +188,12 @@ def cut_clip(src: Path, start_sec: float, end_sec: float, dest: Path) -> Path:
 
     requested_duration = end_sec - start_sec
 
-    # 動画が要求の 2.5 倍以上長く、start_sec がほぼ 0 (デフォルト) なら
-    # 中盤からランダム位置を選択 (静止画化対策)
     if (
         actual_duration != float("inf")
         and start_sec < 0.5
         and actual_duration > requested_duration * 2.5
         and requested_duration > 0
     ):
-        # 動画の 10%〜70% の範囲でランダム start
         lower = max(2.0, actual_duration * 0.10)
         upper = max(lower + 1.0, actual_duration * 0.70 - requested_duration)
         if upper > lower:
@@ -223,10 +224,10 @@ def cut_clip(src: Path, start_sec: float, end_sec: float, dest: Path) -> Path:
         raise RuntimeError(f"clip 長さ {duration:.2f}s が短すぎる (元動画が短い可能性)")
 
     print(f"[make] clip 切り出し: {start_sec}s - {end_sec}s ({duration}s)")
-    # 上半分の解像度に揃える: 1080x960、アスペクト比保持で fit + pad
+    # 縦動画 1080x1920 にカバー (中央クロップ) でスケール
     vf = (
-        f"scale={W}:{HALF_H}:force_original_aspect_ratio=decrease,"
-        f"pad={W}:{HALF_H}:(ow-iw)/2:(oh-ih)/2:color=0x000000,"
+        f"scale={W}:{H}:force_original_aspect_ratio=increase,"
+        f"crop={W}:{H},"
         f"setsar=1,fps={FPS}"
     )
     run(
@@ -247,18 +248,8 @@ def cut_clip(src: Path, start_sec: float, end_sec: float, dest: Path) -> Path:
 
 
 def voicevox_synthesize(text: str, speaker_id: int, dest: Path) -> Path:
-    """VOICEVOX HTTP API で音声合成する。
-
-    Args:
-        text: 読み上げテキスト
-        speaker_id: VOICEVOX speaker_id
-        dest: 出力 wav パス
-
-    Returns:
-        生成された wav ファイルパス
-    """
+    """VOICEVOX HTTP API で音声合成する。"""
     print(f"[make] VOICEVOX 合成 speaker={speaker_id}: {text[:30]}")
-    # audio_query
     q = requests.post(
         f"{VOICEVOX_URL}/audio_query",
         params={"text": text, "speaker": speaker_id},
@@ -267,7 +258,6 @@ def voicevox_synthesize(text: str, speaker_id: int, dest: Path) -> Path:
     q.raise_for_status()
     query = q.json()
 
-    # synthesis
     s = requests.post(
         f"{VOICEVOX_URL}/synthesis",
         params={"speaker": speaker_id},
@@ -280,7 +270,11 @@ def voicevox_synthesize(text: str, speaker_id: int, dest: Path) -> Path:
 
 
 def character_image_path(speaker: str, emotion: str) -> Path:
-    """話者+表情から立ち絵パスを返す。見つからなければ normal にフォールバック。"""
+    """話者+表情から立ち絵パスを返す。
+
+    指定 emotion の PNG が無ければ {speaker}_normal.png にフォールバック。
+    normal すら無ければ FileNotFoundError (placeholder 自動生成はしない)。
+    """
     base = ASSETS_DIR / speaker / f"{speaker}_{emotion}.png"
     if base.exists():
         return base
@@ -288,65 +282,16 @@ def character_image_path(speaker: str, emotion: str) -> Path:
     if fallback.exists():
         print(f"[make] WARNING: {base.name} が無いので {fallback.name} を使用")
         return fallback
-    raise FileNotFoundError(f"立ち絵が見つからない: {base} / {fallback}")
-
-
-def ensure_placeholder_assets(font_path: str) -> None:
-    """assets/{speaker}/{speaker}_{emotion}.png が無ければ ffmpeg で生成する。
-
-    本番運用では Boss が手動でアセットを配置するが、未配置時にもパイプラインを
-    動作確認できるよう、ffmpeg lavfi color + drawtext で簡易な PNG を作る。
-    既存ファイルは上書きしない。
-    """
-    speakers = [
-        ("nyanko", "0x4a90e2", "ニャンコ"),
-        ("zundamon", "0x68d391", "ずんだもん"),
-    ]
-    emotions = ("normal", "happy", "surprised", "thinking")
-    fontfile_arg = font_path.replace("\\", "/").replace(":", "\\:")
-
-    generated_any = False
-    for spk, color, label in speakers:
-        speaker_dir = ASSETS_DIR / spk
-        speaker_dir.mkdir(parents=True, exist_ok=True)
-        for emo in emotions:
-            target = speaker_dir / f"{spk}_{emo}.png"
-            if target.exists():
-                continue
-            display_text = f"{label} {emo}"
-            drawtext = (
-                f"drawtext=fontfile='{fontfile_arg}':"
-                f"text='{display_text}':"
-                f"fontcolor=white:fontsize=40:"
-                f"bordercolor=black:borderw=3:"
-                f"x=(w-text_w)/2:y=(h-text_h)/2"
-            )
-            run(
-                [
-                    "ffmpeg", "-y",
-                    "-f", "lavfi",
-                    "-i", f"color=c={color}:s=400x600:d=1",
-                    "-vf", drawtext,
-                    "-frames:v", "1",
-                    str(target),
-                ],
-                desc=f"placeholder PNG → {target.name}",
-            )
-            print(f"[make] WARNING: 立ち絵未配置のため placeholder を生成: {target}")
-            generated_any = True
-
-    if generated_any:
-        print(
-            "[make] NOTE: assets/ にプレースホルダ画像を生成しました。"
-            "本番運用時は assets/{nyanko,zundamon}/*.png を実画像に差し替えてください。"
-        )
+    raise FileNotFoundError(
+        "立ち絵 PNG が配置されていません。次のいずれかのパスに PNG を配置してください:\n"
+        f"  - {base}\n"
+        f"  - {fallback}\n"
+        "(プレースホルダ自動生成は廃止されました。本番アセットを必ず配置してください)"
+    )
 
 
 def wrap_jp_text(text: str, max_chars_per_line: int = SUBTITLE_WRAP_CHARS) -> str:
-    """日本語テキストを max_chars_per_line で機械的に折り返す。
-
-    句読点や英単語境界を考慮した高度な折返しはしない (Shorts 字幕は短文前提)。
-    """
+    """日本語テキストを max_chars_per_line で機械的に折り返す。"""
     text = text.replace("\r\n", "\n").replace("\r", "\n")
     out_lines: list[str] = []
     for line in text.split("\n"):
@@ -359,12 +304,7 @@ def wrap_jp_text(text: str, max_chars_per_line: int = SUBTITLE_WRAP_CHARS) -> st
 
 
 def escape_drawtext_text(text: str) -> str:
-    """ffmpeg drawtext text= の値用にエスケープする。
-
-    引用符を使わず、特殊文字をすべて \\ でエスケープする方式。
-    改行は \\n エスケープに変換 (drawtext がこれを改行として解釈)。
-    最初に \\ をエスケープする順序が重要 (後で追加される \\ を二重エスケープしないため)。
-    """
+    """ffmpeg drawtext text= の値用にエスケープする (引用符を使わない方式)。"""
     text = text.replace("\\", "\\\\")
     text = text.replace(":", "\\:")
     text = text.replace(",", "\\,")
@@ -378,7 +318,8 @@ def escape_drawtext_text(text: str) -> str:
     return text
 
 
-def render_scene_bottom(
+def compose_scene(
+    clip_path: Path,
     speaker: str,
     emotion: str,
     text: str,
@@ -389,49 +330,69 @@ def render_scene_bottom(
     text_dir: Path,
     scene_index: int,
 ) -> Path:
-    """シーンごとの下半分動画 (立ち絵 + 字幕 + 音声) を生成する。
+    """シーン 1 本分の完成動画 (1080x1920) を生成する。
 
-    出力: 1080x960 / 30fps / aac 音声付き
-
-    drawtext は text= 直書き + 全特殊文字エスケープ方式。
-    textfile= は環境差で silently 機能しないことがあるため使わない。
+    レイアウト:
+    - 背景: clip_path をループ (-stream_loop -1) でフルスクリーン
+    - 立ち絵: scale=CHAR_W:-1、底辺 y=CHAR_BOTTOM_Y、話者に応じて左/右配置
+    - 字幕帯: drawbox y=SUBTITLE_BAND_Y h=SUBTITLE_BAND_H 半透明黒
+    - 字幕: drawtext text= 直書き (textfile= 不使用、エスケープ方式)
+    - 音声: VOICEVOX wav (BGM はこの段階では混ぜない)
     """
     char_img = character_image_path(speaker, emotion)
+    position = SPEAKER_POSITIONS.get(speaker, "right")
+    if position == "right":
+        char_x_expr = f"main_w-overlay_w-{CHAR_MARGIN_X}"
+    else:
+        char_x_expr = f"{CHAR_MARGIN_X}"
+    # 立ち絵の底辺を CHAR_BOTTOM_Y に揃える (画像の高さに依存しない)
+    char_y_expr = f"{CHAR_BOTTOM_Y}-overlay_h"
 
-    # 字幕テキストを折返し → drawtext text= 用にエスケープ
+    # 字幕折返し
     wrapped = wrap_jp_text(text)
     escaped_text = escape_drawtext_text(wrapped)
-    # デバッグ: textfile も同時に書いておく (artifact から確認可能)
+    # デバッグ用: シーンごとのテキストを残す
     text_file = text_dir / f"scene_{scene_index:02d}_text.txt"
     text_file.write_text(wrapped, encoding="utf-8")
-    print(f"[make] scene[{scene_index}] subtitle: {wrapped!r}")
+    print(f"[make] scene[{scene_index}] speaker={speaker} pos={position} text={wrapped!r}")
 
-    # ffmpeg フィルタ用にフォントパスを正規化 (Windows ローカル開発も考慮)
     fontfile_arg = font_path.replace("\\", "/").replace(":", "\\:")
 
-    # 立ち絵: 高さ 700px にリサイズ (アスペクト比維持)
-    # 字幕: 画面下部中央、白文字 + 黒縁、自動折返し済み
+    # 字幕帯の縦中央に文字を置く: y = band_y + (band_h - text_h)/2
+    subtitle_y_expr = f"{SUBTITLE_BAND_Y}+({SUBTITLE_BAND_H}-text_h)/2"
+
     filter_complex = (
-        f"[0:v]format=yuv420p[bg];"
-        f"[1:v]scale=-1:700[char];"
-        f"[bg][char]overlay=(W-w)/2:30[withchar];"
-        f"[withchar]drawtext="
+        # ベース動画 (1080x1920) を yuv420p に正規化
+        f"[0:v]format=yuv420p,setsar=1[v0];"
+        # 立ち絵を CHAR_W に幅固定でスケール (高さは比率維持)
+        f"[1:v]scale={CHAR_W}:-1[char];"
+        # ベースに立ち絵を overlay (右下 or 左下、底辺 y=CHAR_BOTTOM_Y)
+        f"[v0][char]overlay=x={char_x_expr}:y={char_y_expr}[withchar];"
+        # 字幕帯 (半透明黒): y=SUBTITLE_BAND_Y から H まで
+        f"[withchar]drawbox=x=0:y={SUBTITLE_BAND_Y}:w={W}:h={SUBTITLE_BAND_H}:"
+        f"color=black@{SUBTITLE_BAND_ALPHA}:t=fill[withbox];"
+        # 字幕テキスト
+        f"[withbox]drawtext="
         f"fontfile='{fontfile_arg}':"
         f"text={escaped_text}:"
         f"fontcolor=white:"
         f"fontsize={SUBTITLE_FONTSIZE}:"
         f"line_spacing={SUBTITLE_LINE_SPACING}:"
-        f"bordercolor=black:borderw=3:"
+        f"bordercolor=black:borderw={SUBTITLE_BORDERW}:"
         f"x=(w-text_w)/2:"
-        f"y=h-text_h-40[v]"
+        f"y={subtitle_y_expr}"
+        f"[v]"
     )
 
     run(
         [
             "ffmpeg", "-y",
-            "-f", "lavfi",
-            "-i", f"color=c={BG_COLOR}:s={W}x{HALF_H}:d={duration}:r={FPS}",
+            # input 0: ベース動画 (clip をループ)
+            "-stream_loop", "-1",
+            "-i", str(clip_path),
+            # input 1: 立ち絵 PNG (静止画なので -loop 1 + -t)
             "-loop", "1", "-t", str(duration), "-i", str(char_img),
+            # input 2: VOICEVOX 音声
             "-i", str(audio_path),
             "-filter_complex", filter_complex,
             "-map", "[v]", "-map", "2:a",
@@ -442,17 +403,16 @@ def render_scene_bottom(
             "-r", str(FPS),
             str(dest),
         ],
-        desc=f"scene bottom → {dest}",
+        desc=f"compose scene[{scene_index}] → {dest}",
     )
     return dest
 
 
 def concat_scenes(scene_paths: list[Path], dest: Path) -> Path:
-    """シーン下半分動画群を concat する。"""
+    """シーン動画群を concat する (codec 一致済みなので -c copy)。"""
     list_file = WORK_DIR / "concat_list.txt"
     with list_file.open("w", encoding="utf-8") as f:
         for p in scene_paths:
-            # ffmpeg concat demuxer 用にエスケープ
             abs_path = str(p.resolve()).replace("\\", "/")
             f.write(f"file '{abs_path}'\n")
 
@@ -469,82 +429,41 @@ def concat_scenes(scene_paths: list[Path], dest: Path) -> Path:
     return dest
 
 
-def make_top_loop(clip_path: Path, total_duration: float, dest: Path) -> Path:
-    """上半分: 元クリップを total_duration までループした映像を作る。"""
+def mix_bgm(input_video: Path, dest: Path, total_duration: float) -> Path:
+    """完成動画に BGM (-12dB ループ) を mix する。
+
+    BGM が無い場合は voice 音声のみのまま input_video をコピーする。
+    """
+    if not BGM_PATH.exists():
+        print(f"[make] WARNING: BGM が見つからない ({BGM_PATH})。BGMなしで出力。")
+        shutil.copy(input_video, dest)
+        return dest
+
+    filter_complex = (
+        f"[1:a]volume={BGM_VOLUME_DB}dB[bgm];"
+        f"[0:a][bgm]amix=inputs=2:duration=first:dropout_transition=0[a]"
+    )
     run(
         [
             "ffmpeg", "-y",
-            "-stream_loop", "-1",
-            "-i", str(clip_path),
+            "-i", str(input_video),
+            "-stream_loop", "-1", "-i", str(BGM_PATH),
+            "-filter_complex", filter_complex,
+            "-map", "0:v", "-map", "[a]",
             "-t", str(total_duration),
-            "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
-            "-pix_fmt", "yuv420p",
-            "-an",
-            "-r", str(FPS),
+            # video は再エンコード不要 (concat 済みの presentation.mp4 をそのまま)
+            "-c:v", "copy",
+            "-c:a", "aac", "-b:a", "192k",
             str(dest),
         ],
-        desc=f"top loop → {dest}",
+        desc=f"BGM mix → {dest}",
     )
-    return dest
-
-
-def vstack_with_bgm(
-    top: Path, bottom: Path, total_duration: float, dest: Path
-) -> Path:
-    """上下動画を vstack し、BGM を -12dB で mix した最終動画を出力する。"""
-    has_bgm = BGM_PATH.exists()
-    if not has_bgm:
-        print(f"[make] WARNING: BGM が見つからない ({BGM_PATH})。BGMなしで出力。")
-
-    if has_bgm:
-        # 入力: top, bottom, bgm (BGM は -stream_loop -1 で input 段階で無限ループ)
-        # 音声: bottom音声 + bgm (-12dB) を amix
-        filter_complex = (
-            f"[0:v][1:v]vstack=inputs=2[v];"
-            f"[2:a]volume={BGM_VOLUME_DB}dB[bgm];"
-            f"[1:a][bgm]amix=inputs=2:duration=first:dropout_transition=0[a]"
-        )
-        run(
-            [
-                "ffmpeg", "-y",
-                "-i", str(top),
-                "-i", str(bottom),
-                "-stream_loop", "-1", "-i", str(BGM_PATH),
-                "-filter_complex", filter_complex,
-                "-map", "[v]", "-map", "[a]",
-                "-t", str(total_duration),
-                "-c:v", "libx264", "-preset", "medium", "-crf", "21",
-                "-pix_fmt", "yuv420p",
-                "-c:a", "aac", "-b:a", "192k",
-                "-r", str(FPS),
-                str(dest),
-            ],
-            desc=f"final → {dest}",
-        )
-    else:
-        run(
-            [
-                "ffmpeg", "-y",
-                "-i", str(top),
-                "-i", str(bottom),
-                "-filter_complex", "[0:v][1:v]vstack=inputs=2[v]",
-                "-map", "[v]", "-map", "1:a",
-                "-t", str(total_duration),
-                "-c:v", "libx264", "-preset", "medium", "-crf", "21",
-                "-pix_fmt", "yuv420p",
-                "-c:a", "aac", "-b:a", "192k",
-                "-r", str(FPS),
-                str(dest),
-            ],
-            desc=f"final (no bgm) → {dest}",
-        )
     return dest
 
 
 def main() -> int:
     """メインエントリポイント。"""
     if WORK_DIR.exists():
-        # 過去の中間生成物を一旦掃除 (script.json / candidates.json などは残す)
         for sub in ("scenes",):
             shutil.rmtree(WORK_DIR / sub, ignore_errors=True)
     WORK_DIR.mkdir(parents=True, exist_ok=True)
@@ -556,12 +475,6 @@ def main() -> int:
     except Exception as exc:
         print(f"[make] FATAL: フォント解決失敗: {exc}")
         return 99
-
-    # 立ち絵が未配置ならプレースホルダ PNG を生成 (動作確認用)
-    try:
-        ensure_placeholder_assets(font_path)
-    except Exception as exc:
-        print(f"[make] WARNING: placeholder 生成失敗: {exc} (続行)")
 
     try:
         script = load_script()
@@ -575,7 +488,7 @@ def main() -> int:
         print("[make] FATAL: _meta.media_url が空。fetch_videos.py の出力を確認。")
         return 2
 
-    # 1. 元動画ダウンロード (公式 API の MP4 直リンクから requests で取得)
+    # 1. 元動画ダウンロード
     source_path = WORK_DIR / "source.mp4"
     try:
         download_video(media_url, source_path)
@@ -583,7 +496,7 @@ def main() -> int:
         print(f"[make] FATAL: ダウンロード失敗: {exc}")
         return 2
 
-    # 2. clip 切り出し
+    # 2. clip 切り出し (1080x1920 フルスクリーン)
     clip = script["clip"]
     clip_path = WORK_DIR / "clip.mp4"
     try:
@@ -592,7 +505,7 @@ def main() -> int:
         print(f"[make] FATAL: clip 切り出し失敗: {exc}")
         return 3
 
-    # 3, 4. シーンごとに VOICEVOX 合成 + 下半分動画生成
+    # 3, 4. シーンごとに VOICEVOX 合成 + 完成シーン動画生成
     scene_videos: list[Path] = []
     for i, sc in enumerate(script["scenes"]):
         speaker = sc["speaker"]
@@ -615,12 +528,12 @@ def main() -> int:
         except Exception as exc:
             print(f"[make] FATAL: ffprobe scene[{i}] 失敗: {exc}")
             return 6
-        # 末尾に余韻 0.3s
-        duration += 0.3
+        duration += 0.3  # 末尾余韻
 
         scene_video = scenes_dir / f"scene_{i:02d}.mp4"
         try:
-            render_scene_bottom(
+            compose_scene(
+                clip_path=clip_path,
                 speaker=speaker,
                 emotion=emotion,
                 text=text,
@@ -637,29 +550,21 @@ def main() -> int:
         scene_videos.append(scene_video)
 
     # 5. concat
-    bottom_path = WORK_DIR / "bottom.mp4"
+    presentation_path = WORK_DIR / "presentation.mp4"
     try:
-        concat_scenes(scene_videos, bottom_path)
+        concat_scenes(scene_videos, presentation_path)
     except Exception as exc:
         print(f"[make] FATAL: concat 失敗: {exc}")
         return 8
 
-    total_duration = ffprobe_duration(bottom_path)
+    total_duration = ffprobe_duration(presentation_path)
     print(f"[make] 総再生時間: {total_duration:.2f}s")
 
-    # 6. 上半分ループ
-    top_path = WORK_DIR / "top.mp4"
+    # 6. BGM mix
     try:
-        make_top_loop(clip_path, total_duration, top_path)
+        mix_bgm(presentation_path, OUTPUT_PATH, total_duration)
     except Exception as exc:
-        print(f"[make] FATAL: top loop 失敗: {exc}")
-        return 9
-
-    # 7. vstack + BGM
-    try:
-        vstack_with_bgm(top_path, bottom_path, total_duration, OUTPUT_PATH)
-    except Exception as exc:
-        print(f"[make] FATAL: 最終合成失敗: {exc}")
+        print(f"[make] FATAL: BGM mix 失敗: {exc}")
         return 10
 
     print(f"[make] 完成: {OUTPUT_PATH} ({total_duration:.2f}s)")
