@@ -3,12 +3,14 @@
 work/candidates.json (fetch_videos.py 出力) を読み:
 1. logs/video_posted.jsonl で既に動画化済みの video_id を除外
 2. weight (高い順) → published_at (新しい順) でソート
+   published_at が無いソース (Pixabay/Pexels 等) は同 weight 内で random shuffle
 3. トップ1件を work/selected.json に書き出す
 """
 
 from __future__ import annotations
 
 import json
+import random
 import sys
 from pathlib import Path
 from typing import Any
@@ -72,17 +74,28 @@ def exclude_posted(
 
 
 def sort_candidates(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """weight (降順) → published_at (降順) でソートする。"""
+    """weight (降順) → published_at (降順) でソートする。
+
+    published_at が None / 取得不可の場合は 0 扱い。
+    最終的に同 weight & 同 published_at の中で variety を確保するため shuffle した上で
+    安定ソートする (Python の sorted は安定なので、shuffle 結果のうちキー一致グループは
+    元順序を維持する → 結果として同条件内のみがランダム化される)。
+    """
+    shuffled = list(candidates)
+    random.shuffle(shuffled)
 
     def sort_key(c: dict[str, Any]) -> tuple[int, float]:
         weight = int(c.get("weight", 0))
-        try:
-            ts = date_parser.parse(c.get("published_at", "")).timestamp()
-        except (ValueError, TypeError):
-            ts = 0.0
+        pub = c.get("published_at")
+        ts = 0.0
+        if pub:
+            try:
+                ts = date_parser.parse(str(pub)).timestamp()
+            except (ValueError, TypeError):
+                ts = 0.0
         return (-weight, -ts)
 
-    return sorted(candidates, key=sort_key)
+    return sorted(shuffled, key=sort_key)
 
 
 def main() -> int:
@@ -112,7 +125,9 @@ def main() -> int:
     print(f"  source_name : {selected.get('source_name')}")
     print(f"  weight      : {selected.get('weight')}")
     print(f"  published_at: {selected.get('published_at')}")
-    print(f"  url         : {selected.get('url')}")
+    print(f"  page_url    : {selected.get('page_url')}")
+    print(f"  media_url   : {selected.get('media_url')}")
+    print(f"  duration    : {selected.get('duration')}s")
 
     WORK_DIR.mkdir(parents=True, exist_ok=True)
     with SELECTED_PATH.open("w", encoding="utf-8") as f:

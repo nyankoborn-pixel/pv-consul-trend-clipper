@@ -1,79 +1,86 @@
 # 動画ソース定義
 #
-# type:
-#   youtube_channel : チャンネル RSS から最新動画を取得
-#                     https://www.youtube.com/feeds/videos.xml?channel_id=XXX
-#   search          : YouTube Data API search.list
-#                     videoLicense=creativeCommon で絞り込み
+# YouTube は完全廃止。bot 検知の運用負荷を回避するため、
+# 公式 API / アーカイブから直接 MP4 をダウンロードする方式に統一。
 #
-# weight: 選定優先度 (1-10、高いほど優先)
+# type:
+#   pixabay          : Pixabay Video API     (https://pixabay.com/api/docs/)
+#   pexels           : Pexels Video API      (https://www.pexels.com/api/)
+#   nasa             : NASA Image and Video Library (https://images-api.nasa.gov)
+#   usgs_volcano     : USGS Volcano Hazards multimedia (web scraping、ベストエフォート)
+#   internet_archive : Internet Archive advancedsearch (https://archive.org)
+#
+# weight             : 選定優先度 (1-10、高いほど優先)
+# authority_intro    : 台本冒頭で使われるソース紹介句のヒント
+# license            : 概要欄の出典表記用ラベル
 #
 # 全ソースの動画は元音声カット + 出典明記の上で利用する。
 
 sources:
-  # ===== 公的機関 (パブリックドメイン / 政府制作) =====
+  # ===== メイン取得元 (フリー素材プラットフォーム) =====
 
-  - name: "NASA"
-    type: "youtube_channel"
-    channel_id: "UCLA_DiR1FfKNvjuUpBHmylQ"
+  - name: "Pixabay"
+    type: "pixabay"
+    queries:
+      - "natural disaster"
+      - "earthquake"
+      - "tornado"
+      - "hurricane"
+      - "tsunami"
+      - "volcano"
+      - "lightning"
+    weight: 8
+    authority_intro: "Pixabayで公開されている自然現象の映像"
+    license: "Pixabay License"
+
+  - name: "Pexels"
+    type: "pexels"
+    queries:
+      - "disaster"
+      - "explosion"
+      - "storm"
+      - "shocking"
+    weight: 8
+    authority_intro: "Pexelsで公開されているフリー素材映像"
+    license: "Pexels License"
+
+  # ===== サブ取得元 (公的機関、権威付け用) =====
+
+  - name: "NASA Image and Video Library"
+    type: "nasa"
+    queries:
+      - "explosion"
+      - "launch"
+      - "earth"
+      - "storm"
     weight: 9
-    license_note: "U.S. government work / public domain"
+    authority_intro: "米国航空宇宙局NASAが公開した映像"
+    license: "Public Domain (NASA media usage guidelines)"
 
-  - name: "SpaceX"
-    type: "youtube_channel"
-    channel_id: "UCtI0Hodo5o5dUb67FeUjDeA"
-    weight: 9
-    license_note: "official channel — fair use with attribution"
+  - name: "USGS Volcano Hazards"
+    type: "usgs_volcano"
+    weight: 7
+    authority_intro: "米国地質調査所USGSの火山活動アーカイブ映像"
+    license: "Public Domain (U.S. Government work)"
 
-  - name: "USGS"
-    type: "youtube_channel"
-    channel_id: "UCkoAM1m2-Bsd0xR6cOnsR3w"
-    weight: 8
-    license_note: "U.S. government work / public domain"
+  # ===== サブ取得元 (歴史的衝撃映像) =====
 
-  - name: "NOAA"
-    type: "youtube_channel"
-    channel_id: "UC_LK-Cb3DNjKnk3J2g4O0Mw"
-    weight: 8
-    license_note: "U.S. government work / public domain"
-
-  - name: "U.S. Department of Defense"
-    type: "youtube_channel"
-    channel_id: "UC4-RBjqsnFVIAYg-Wvk4OWA"
-    weight: 8
-    license_note: "U.S. government work / public domain"
-
-  # ===== CC BY 検索ソース =====
-
-  - name: "CC BY Search - shocking footage"
-    type: "search"
-    query: "shocking footage"
-    license: "creativeCommon"
+  - name: "Internet Archive"
+    type: "internet_archive"
+    queries:
+      - "explosion footage"
+      - "natural disaster archival"
+      - "historical earthquake"
+      - "lightning storm"
     weight: 5
-
-  - name: "CC BY Search - amazing nature"
-    type: "search"
-    query: "amazing nature"
-    license: "creativeCommon"
-    weight: 5
-
-  - name: "CC BY Search - space discovery"
-    type: "search"
-    query: "space discovery"
-    license: "creativeCommon"
-    weight: 6
-
-  - name: "CC BY Search - extreme weather"
-    type: "search"
-    query: "extreme weather"
-    license: "creativeCommon"
-    weight: 5
+    authority_intro: "Internet Archiveに保存された歴史的映像"
+    license: "Various (verify per-item)"
 
 # 取得設定
 fetch:
-  # 過去 N 時間以内の動画のみ候補にする
-  recent_hours: 48
-  # search タイプ 1 件あたり最大何件取得するか
-  search_max_results: 10
-  # チャンネル RSS から最大何件取得するか (RSS 仕様で最新 15 件まで)
-  channel_max_results: 15
+  # 各クエリで取得する最大件数
+  per_query_results: 6
+  # HTTP タイムアウト (秒)
+  request_timeout: 30
+  # 最低動画長 (秒): これ未満は除外 (短すぎる素材は使えない)
+  min_duration: 5
