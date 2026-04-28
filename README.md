@@ -69,19 +69,24 @@ cd pv-consul-trend-clipper
 | `YOUTUBE_CLIENT_ID` | OAuth クライアント ID |
 | `YOUTUBE_CLIENT_SECRET` | OAuth クライアントシークレット |
 | `YOUTUBE_REFRESH_TOKEN` | OAuth リフレッシュトークン |
-| `YOUTUBE_COOKIES` | (任意) Netscape 形式 cookies.txt の全文。bot 検知された時の最終フォールバック |
+| `YOUTUBE_COOKIES` | **(事実上必須)** Netscape 形式 cookies.txt の全文。bot 検知回避用 |
 
 > logs/ への commit & push はワークフローの `GITHUB_TOKEN` (permissions: contents: write) で行うため、追加の PAT は不要です。
 > cron-job.org から workflow_dispatch を叩く用途だけ別途 GitHub PAT が必要 (リポジトリ Secrets ではなく cron-job.org 側に設定)。
 
-#### YOUTUBE_COOKIES の取得方法 (bot 検知された時用)
+#### ⚠️ YOUTUBE_COOKIES は事実上必須です
 
-GitHub Actions の IP 帯は YouTube に bot として検知されやすく、`Sign in to confirm you're not a bot` でエラーになることがあります。
-通常は `player_client=tv,web_safari,mweb,android` のフォールバックで回避しますが、それでも失敗する場合は cookies を渡してください。
+GitHub Actions の IP 帯は YouTube から bot として検知されやすく、`Sign in to confirm you're not a bot` で yt-dlp が 403 します。`player_client=ios,tv_simply,web_safari,...` のフォールバックを実装していますが、**多くのケースで cookies なしでは抜けられません**。
 
-1. Chrome / Firefox の拡張機能 [Get cookies.txt LOCALLY](https://chromewebstore.google.com/detail/get-cookiestxt-locally/cclelndahbckbenkjhflpdbgdldlbecc) などを使い、`youtube.com` ドメインの cookies を Netscape 形式でエクスポート
-2. ファイル全文を `YOUTUBE_COOKIES` Secret に貼り付け
-3. ワークフロー側で自動的に `--cookies` に渡されます
+**準備手順**:
+
+1. **専用の YouTube アカウントを用意することを推奨** (cookie 漏洩時の影響を局所化)
+2. ブラウザでそのアカウントに YouTube ログイン
+3. 拡張機能 [Get cookies.txt LOCALLY](https://chromewebstore.google.com/detail/get-cookiestxt-locally/cclelndahbckbenkjhflpdbgdldlbecc) などで `youtube.com` のcookies を Netscape 形式でエクスポート
+4. 出力された `cookies.txt` の **全文** を `YOUTUBE_COOKIES` Secret に貼付
+5. これで yt-dlp に自動的に `--cookies` 渡されます
+
+**運用上の注意**: cookies は 1〜2 週間で期限切れすることがあります。投稿が止まったら同じ手順で再エクスポート → Secret 更新。
 
 ### 4. cron-job.org にジョブ登録
 

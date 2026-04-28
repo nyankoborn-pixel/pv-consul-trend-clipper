@@ -33,15 +33,20 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
 
 # yt-dlp の YouTube bot 検知を回避するためのオプション。
-# GitHub Actions の IP 帯では default client がしばしばブロックされるため、
-# player_client を tv / web_safari / mweb の順に試す。
+# GitHub Actions の IP 帯では bot 検知が強くなっており、これだけでは抜けないことも多い。
+# その場合は YOUTUBE_COOKIES (Netscape cookies.txt) を Secrets に登録する。
+#
+# player_client はリクエストに使うクライアント種別。
+# ios / tv_simply / web_safari / web_creator は cookieless でもしばしば抜ける。
+# user-agent 上書きは player_client ごとの自動 UA を阻害するので付けない。
 YT_DLP_BYPASS_ARGS = [
     "--no-playlist",
     "--no-warnings",
-    "--extractor-args", "youtube:player_client=tv,web_safari,mweb,android",
-    "--user-agent",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+    "--extractor-args",
+    "youtube:player_client=ios,tv_simply,web_safari,web_creator,mweb,tv,android",
+    "--sleep-requests", "1",
+    "--retries", "3",
+    "--retry-sleep", "fragment:5",
 ]
 
 

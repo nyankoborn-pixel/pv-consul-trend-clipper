@@ -41,10 +41,11 @@ BGM_VOLUME_DB = -12.0
 YT_DLP_BYPASS_ARGS = [
     "--no-playlist",
     "--no-warnings",
-    "--extractor-args", "youtube:player_client=tv,web_safari,mweb,android",
-    "--user-agent",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+    "--extractor-args",
+    "youtube:player_client=ios,tv_simply,web_safari,web_creator,mweb,tv,android",
+    "--sleep-requests", "1",
+    "--retries", "3",
+    "--retry-sleep", "fragment:5",
 ]
 
 
