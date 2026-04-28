@@ -412,7 +412,8 @@ def compose_scene(
     # 立ち絵の底辺を CHAR_BOTTOM_Y に揃える (画像の高さに依存しない)
     char_y_expr = f"{CHAR_BOTTOM_Y}-overlay_h"
 
-    # 字幕折返し
+    # text は main() 側で改行クリーン済み (VOICEVOX と drawtext で同一の文字列)。
+    # ここで wrap_jp_text() による機械的な折返しのみ適用する。
     wrapped = wrap_jp_text(text)
     escaped_text = escape_drawtext_text(wrapped)
     # デバッグ用: シーンごとのテキストを残す
@@ -425,10 +426,15 @@ def compose_scene(
     # 字幕の y 位置: 基本は帯上端 + TOP_PAD (top-anchored)。
     # 長文で text_h が大きい場合に下端からはみ出さないよう、
     # フレーム下端 - BOTTOM_SAFE - text_h を上限としてクランプ。
-    subtitle_y_expr = (
-        f"min({H}-{SUBTITLE_BOTTOM_SAFE}-text_h,"
-        f"{SUBTITLE_BAND_Y}+{SUBTITLE_TOP_PAD})"
-    )
+    #
+    # 注意: ffmpeg drawtext の y= は filter parser が先に解釈するため、
+    # Python 側の算術式 (例: "1430+40") をそのまま渡すと
+    # "No such filter: '1430+40'" でパースエラーになる。
+    # 定数演算は Python 側で事前評価し、リテラル数値だけ渡す。
+    # text_h は drawtext 自身が解決する変数なので残してよい。
+    subtitle_y_top = SUBTITLE_BAND_Y + SUBTITLE_TOP_PAD          # 1470
+    subtitle_y_max = H - SUBTITLE_BOTTOM_SAFE                    # 1850
+    subtitle_y_expr = f"min({subtitle_y_max}-text_h,{subtitle_y_top})"
 
     filter_complex = (
         # ベース動画 (1080x1920) を yuv420p に正規化
@@ -584,7 +590,15 @@ def main() -> int:
     for i, sc in enumerate(script["scenes"]):
         speaker = sc["speaker"]
         emotion = sc.get("emotion", "normal")
-        text = sc["text"]
+        # Gemini が稀に \n / 実改行 / \r を text に混入することがある。
+        # VOICEVOX (発音される) と drawtext (filter parser エラーになる) の両方を
+        # 壊すので、ここで一括除去してから両者に同じ文字列を渡す。
+        raw_text = sc["text"]
+        text = (
+            raw_text.replace("\\n", "")
+            .replace("\n", "")
+            .replace("\r", "")
+        )
         speaker_id = SPEAKER_IDS.get(speaker)
         if speaker_id is None:
             print(f"[make] FATAL: unknown speaker={speaker}")
