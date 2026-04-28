@@ -1,0 +1,79 @@
+# 動画ソース定義
+#
+# type:
+#   youtube_channel : チャンネル RSS から最新動画を取得
+#                     https://www.youtube.com/feeds/videos.xml?channel_id=XXX
+#   search          : YouTube Data API search.list
+#                     videoLicense=creativeCommon で絞り込み
+#
+# weight: 選定優先度 (1-10、高いほど優先)
+#
+# 全ソースの動画は元音声カット + 出典明記の上で利用する。
+
+sources:
+  # ===== 公的機関 (パブリックドメイン / 政府制作) =====
+
+  - name: "NASA"
+    type: "youtube_channel"
+    channel_id: "UCLA_DiR1FfKNvjuUpBHmylQ"
+    weight: 9
+    license_note: "U.S. government work / public domain"
+
+  - name: "SpaceX"
+    type: "youtube_channel"
+    channel_id: "UCtI0Hodo5o5dUb67FeUjDeA"
+    weight: 9
+    license_note: "official channel — fair use with attribution"
+
+  - name: "USGS"
+    type: "youtube_channel"
+    channel_id: "UCkoAM1m2-Bsd0xR6cOnsR3w"
+    weight: 8
+    license_note: "U.S. government work / public domain"
+
+  - name: "NOAA"
+    type: "youtube_channel"
+    channel_id: "UC_LK-Cb3DNjKnk3J2g4O0Mw"
+    weight: 8
+    license_note: "U.S. government work / public domain"
+
+  - name: "U.S. Department of Defense"
+    type: "youtube_channel"
+    channel_id: "UC4-RBjqsnFVIAYg-Wvk4OWA"
+    weight: 8
+    license_note: "U.S. government work / public domain"
+
+  # ===== CC BY 検索ソース =====
+
+  - name: "CC BY Search - shocking footage"
+    type: "search"
+    query: "shocking footage"
+    license: "creativeCommon"
+    weight: 5
+
+  - name: "CC BY Search - amazing nature"
+    type: "search"
+    query: "amazing nature"
+    license: "creativeCommon"
+    weight: 5
+
+  - name: "CC BY Search - space discovery"
+    type: "search"
+    query: "space discovery"
+    license: "creativeCommon"
+    weight: 6
+
+  - name: "CC BY Search - extreme weather"
+    type: "search"
+    query: "extreme weather"
+    license: "creativeCommon"
+    weight: 5
+
+# 取得設定
+fetch:
+  # 過去 N 時間以内の動画のみ候補にする
+  recent_hours: 48
+  # search タイプ 1 件あたり最大何件取得するか
+  search_max_results: 10
+  # チャンネル RSS から最大何件取得するか (RSS 仕様で最新 15 件まで)
+  channel_max_results: 15
