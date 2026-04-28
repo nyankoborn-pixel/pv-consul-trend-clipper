@@ -1,19 +1,20 @@
-"""動画を合成する (フルスクリーン動画 + 立ち絵オーバーレイ方式)。
+"""動画を合成する (フルスクリーン動画 + 字幕帯のみ、立ち絵廃止)。
 
 work/script.json (generate_script.py 出力) を入力に:
 1. media_url (各 API の MP4 直リンク) を requests ストリームでダウンロード
 2. clip 区間 (start_sec, end_sec) を 1080x1920 (フルスクリーン縦) で切り出し
    元音声はカット。実動画長より end_sec が大きければ自動で丸める。
    start_sec≈0 で動画が要求の 2.5 倍以上長い場合はランダム中盤切出し。
-3. シーンごとに VOICEVOX で音声合成
-4. シーンごとに 1080x1920 の完成動画 (clip ループ + 立ち絵 + 字幕帯 + 音声) を生成
-   - 話者が nyanko なら立ち絵を右下、zundamon なら左下に配置
-   - 立ち絵は scale=400:-1、底辺を字幕帯の上端 (y=1490) に揃える
-   - 字幕帯は y=1500..1920 の半透明黒 (alpha 0.6) + 中央配置 56pt 白文字
+3. シーンごとに VOICEVOX で音声合成 (nyanko=青山龍星 / zundamon)
+4. シーンごとに 1080x1920 の完成動画 (clip ループ + 字幕帯 + 字幕 + 音声) を生成
+   - 字幕帯: y=1430..1850 半透明黒 (alpha 0.6)
+   - 字幕文字: 56pt 白 + 黒縁 4px、帯上端 + 40px から top-anchored、
+              長文時は下端 70px 安全マージンでクランプ
 5. 全シーンを concat → presentation.mp4
 6. assets/bgm.mp3 を -12dB で mix → output.mp4
 
-立ち絵 PNG が無い場合はエラーで停止する (placeholder 自動生成は廃止)。
+立ち絵 (キャラ画像) は元動画の被写体被覆を避けるため廃止。
+キャラの識別は音声 (VOICEVOX 声分け) のみで行う。
 """
 
 from __future__ import annotations
@@ -51,14 +52,11 @@ H = 1920
 FPS = 30
 
 # レイアウト定数
-# - 立ち絵: scale=CHAR_W:-1 (アスペクト比維持)、画面端から CHAR_MARGIN_X
-#           底辺 y=CHAR_BOTTOM_Y (字幕帯の上端 1430 - 余白 10)
+# - 立ち絵は廃止。元動画の被写体被覆を最小化するため video + 字幕帯のみで構成。
+#   音声は VOICEVOX で nyanko / zundamon の声分けを継続。
 # - 字幕帯: y=SUBTITLE_BAND_Y..(SUBTITLE_BAND_Y+SUBTITLE_BAND_H)、半透明黒
 # - 字幕文字: 帯の上端 + TOP_PAD から配置 (top-anchored)、長文時は
 #             下端から BOTTOM_SAFE 余白を確保するようクランプ。白文字 + 黒縁。
-CHAR_W = 400
-CHAR_MARGIN_X = 40
-CHAR_BOTTOM_Y = 1420  # 立ち絵の底辺の y 座標 (字幕帯上端 1430 より 10px 上)
 SUBTITLE_BAND_Y = 1430
 SUBTITLE_BAND_H = 420
 SUBTITLE_BAND_ALPHA = 0.6
@@ -69,16 +67,10 @@ SUBTITLE_BORDERW = 4
 SUBTITLE_TOP_PAD = 40       # 字幕帯の上端から文字までの余白
 SUBTITLE_BOTTOM_SAFE = 70   # フレーム下端から確保する安全マージン
 
-# キャラ → VOICEVOX speaker_id
+# キャラ → VOICEVOX speaker_id (音声の声分けは継続)
 SPEAKER_IDS = {
     "zundamon": 3,
     "nyanko": 13,  # 青山龍星
-}
-
-# 話者ごとの立ち絵配置 (right=右下、left=左下)
-SPEAKER_POSITIONS = {
-    "nyanko": "right",
-    "zundamon": "left",
 }
 
 # 日本語フォントの探索候補
@@ -291,68 +283,6 @@ def voicevox_synthesize(text: str, speaker_id: int, dest: Path) -> Path:
     return dest
 
 
-def character_image_path(speaker: str, emotion: str) -> Path:
-    """話者+表情から立ち絵パスを返す。
-
-    指定 emotion の PNG が無ければ {speaker}_normal.png にフォールバック。
-    normal すら無ければ FileNotFoundError (placeholder 自動生成はしない)。
-    """
-    base = ASSETS_DIR / speaker / f"{speaker}_{emotion}.png"
-    if base.exists():
-        return base
-    fallback = ASSETS_DIR / speaker / f"{speaker}_normal.png"
-    if fallback.exists():
-        print(f"[make] WARNING: {base.name} が無いので {fallback.name} を使用")
-        return fallback
-    # emotion=="normal" だと base と fallback が同一パスを指すので順序維持で重複排除
-    search_paths = list(dict.fromkeys([str(base), str(fallback)]))
-    paths_block = "\n".join(f"  - {p}" for p in search_paths)
-    raise FileNotFoundError(
-        "立ち絵 PNG が配置されていません。次のパスに PNG を配置してください:\n"
-        f"{paths_block}\n"
-        "(プレースホルダ自動生成は廃止されました。本番アセットを必ず配置してください)"
-    )
-
-
-def verify_required_assets(script: dict[str, Any]) -> int:
-    """script.json の全シーンが要求する立ち絵 PNG が揃っているか早期チェック。
-
-    各シーンで primary ({speaker}_{emotion}.png) と fallback ({speaker}_normal.png)
-    のどちらも無いものを集めて一括レポート。VOICEVOX 合成や ffmpeg 起動前に止める。
-
-    Returns:
-        0  : 全シーン解決可能
-        11 : 1 件でも解決不能あり (main() がそのまま return code として使う)
-    """
-    scenes = script.get("scenes", [])
-    issues: list[tuple[int, str, str, Path]] = []
-    for i, sc in enumerate(scenes):
-        speaker = sc.get("speaker") or ""
-        emotion = sc.get("emotion") or "normal"
-        primary = ASSETS_DIR / speaker / f"{speaker}_{emotion}.png"
-        fallback = ASSETS_DIR / speaker / f"{speaker}_normal.png"
-        if primary.exists() or fallback.exists():
-            continue
-        issues.append((i, speaker, emotion, primary))
-
-    if not issues:
-        print(f"[make] 立ち絵チェック OK: 全 {len(scenes)} シーンで PNG 解決可能")
-        return 0
-
-    # 配置すべきユニークなパス (順序維持)
-    missing_unique = list(dict.fromkeys(p for _, _, _, p in issues))
-    affected = ", ".join(f"scene[{i}]({sp},{em})" for i, sp, em, _ in issues)
-    print(
-        f"[make] FATAL: 立ち絵 PNG 不足。{len(missing_unique)} ファイル要配置、"
-        f"{len(issues)} シーンが解決不能:"
-    )
-    for p in missing_unique:
-        print(f"  - {p}")
-    print(f"[make]   該当シーン: {affected}")
-    print("[make] (VOICEVOX 合成前に検出。assets/ に PNG を配置してください)")
-    return 11
-
-
 def wrap_jp_text(text: str, max_chars_per_line: int = SUBTITLE_WRAP_CHARS) -> str:
     """日本語テキストを max_chars_per_line で機械的に折り返す。"""
     text = text.replace("\r\n", "\n").replace("\r", "\n")
@@ -393,7 +323,6 @@ def escape_drawtext_text(text: str) -> str:
 def compose_scene(
     clip_path: Path,
     speaker: str,
-    emotion: str,
     text: str,
     audio_path: Path,
     duration: float,
@@ -404,22 +333,15 @@ def compose_scene(
 ) -> Path:
     """シーン 1 本分の完成動画 (1080x1920) を生成する。
 
-    レイアウト:
+    レイアウト (立ち絵廃止後):
     - 背景: clip_path をループ (-stream_loop -1) でフルスクリーン
-    - 立ち絵: scale=CHAR_W:-1、底辺 y=CHAR_BOTTOM_Y、話者に応じて左/右配置
     - 字幕帯: drawbox y=SUBTITLE_BAND_Y h=SUBTITLE_BAND_H 半透明黒
     - 字幕: drawtext text= 直書き (textfile= 不使用、エスケープ方式)
     - 音声: VOICEVOX wav (BGM はこの段階では混ぜない)
-    """
-    char_img = character_image_path(speaker, emotion)
-    position = SPEAKER_POSITIONS.get(speaker, "right")
-    if position == "right":
-        char_x_expr = f"main_w-overlay_w-{CHAR_MARGIN_X}"
-    else:
-        char_x_expr = f"{CHAR_MARGIN_X}"
-    # 立ち絵の底辺を CHAR_BOTTOM_Y に揃える (画像の高さに依存しない)
-    char_y_expr = f"{CHAR_BOTTOM_Y}-overlay_h"
 
+    立ち絵は元動画の被写体を被覆する問題があるため廃止。
+    話者識別は VOICEVOX の声 (nyanko=青山龍星 / zundamon) で継続。
+    """
     # text は main() 側で改行クリーン済み (VOICEVOX と drawtext で同一の文字列)。
     # ここで wrap_jp_text() による機械的な折返しのみ適用する。
     wrapped = wrap_jp_text(text)
@@ -427,7 +349,7 @@ def compose_scene(
     # デバッグ用: シーンごとのテキストを残す
     text_file = text_dir / f"scene_{scene_index:02d}_text.txt"
     text_file.write_text(wrapped, encoding="utf-8")
-    print(f"[make] scene[{scene_index}] speaker={speaker} pos={position} text={wrapped!r}")
+    print(f"[make] scene[{scene_index}] speaker={speaker} text={wrapped!r}")
 
     fontfile_arg = font_path.replace("\\", "/").replace(":", "\\:")
 
@@ -451,12 +373,8 @@ def compose_scene(
     filter_complex = (
         # ベース動画 (1080x1920) を yuv420p に正規化
         f"[0:v]format=yuv420p,setsar=1[v0];"
-        # 立ち絵を CHAR_W に幅固定でスケール (高さは比率維持)
-        f"[1:v]scale={CHAR_W}:-1[char];"
-        # ベースに立ち絵を overlay (右下 or 左下、底辺 y=CHAR_BOTTOM_Y)
-        f"[v0][char]overlay=x={char_x_expr}:y={char_y_expr}[withchar];"
         # 字幕帯 (半透明黒): y=SUBTITLE_BAND_Y から H まで
-        f"[withchar]drawbox=x=0:y={SUBTITLE_BAND_Y}:w={W}:h={SUBTITLE_BAND_H}:"
+        f"[v0]drawbox=x=0:y={SUBTITLE_BAND_Y}:w={W}:h={SUBTITLE_BAND_H}:"
         f"color=black@{SUBTITLE_BAND_ALPHA}:t=fill[withbox];"
         # 字幕テキスト
         f"[withbox]drawtext="
@@ -477,12 +395,10 @@ def compose_scene(
             # input 0: ベース動画 (clip をループ)
             "-stream_loop", "-1",
             "-i", str(clip_path),
-            # input 1: 立ち絵 PNG (静止画なので -loop 1 + -t)
-            "-loop", "1", "-t", str(duration), "-i", str(char_img),
-            # input 2: VOICEVOX 音声
+            # input 1: VOICEVOX 音声
             "-i", str(audio_path),
             "-filter_complex", filter_complex,
-            "-map", "[v]", "-map", "2:a",
+            "-map", "[v]", "-map", "1:a",
             "-t", str(duration),
             "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
             "-pix_fmt", "yuv420p",
@@ -569,10 +485,7 @@ def main() -> int:
         print(f"[make] FATAL: script 読み込み失敗: {exc}")
         return 1
 
-    # 立ち絵 PNG 不足を VOICEVOX 合成や clip ダウンロード前に検出
-    rc = verify_required_assets(script)
-    if rc != 0:
-        return rc
+    # 立ち絵は廃止したのでアセット存在チェックは不要 (script.json の _meta は維持)。
 
     meta = script["_meta"]
     media_url = meta.get("media_url") or ""
@@ -601,7 +514,7 @@ def main() -> int:
     scene_videos: list[Path] = []
     for i, sc in enumerate(script["scenes"]):
         speaker = sc["speaker"]
-        emotion = sc.get("emotion", "normal")
+        # 立ち絵廃止後 emotion は使われない (VOICEVOX speaker_id にも影響しない)
         # Gemini が稀に \n / 実改行 / \r を text に混入することがある。
         # VOICEVOX (発音される) と drawtext (filter parser エラーになる) の両方を
         # 壊すので、ここで一括除去してから両者に同じ文字列を渡す。
@@ -635,7 +548,6 @@ def main() -> int:
             compose_scene(
                 clip_path=clip_path,
                 speaker=speaker,
-                emotion=emotion,
                 text=text,
                 audio_path=audio_path,
                 duration=duration,
