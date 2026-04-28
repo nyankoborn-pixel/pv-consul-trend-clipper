@@ -22,7 +22,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-import google.generativeai as genai
+from google import genai
 
 ROOT = Path(__file__).resolve().parent.parent
 WORK_DIR = ROOT / "work"
@@ -31,6 +31,34 @@ SCRIPT_PATH = WORK_DIR / "script.json"
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+
+# yt-dlp の YouTube bot 検知を回避するためのオプション。
+# GitHub Actions の IP 帯では default client がしばしばブロックされるため、
+# player_client を tv / web_safari / mweb の順に試す。
+YT_DLP_BYPASS_ARGS = [
+    "--no-playlist",
+    "--no-warnings",
+    "--extractor-args", "youtube:player_client=tv,web_safari,mweb,android",
+    "--user-agent",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+]
+
+
+def yt_dlp_extra_args() -> list[str]:
+    """環境変数 YOUTUBE_COOKIES が設定されていれば --cookies を追加する。
+
+    YOUTUBE_COOKIES には Netscape 形式の cookies.txt 全文を入れる想定。
+    """
+    args: list[str] = []
+    cookies = os.environ.get("YOUTUBE_COOKIES", "").strip()
+    if cookies:
+        WORK_DIR.mkdir(parents=True, exist_ok=True)
+        cookies_file = WORK_DIR / "cookies.txt"
+        cookies_file.write_text(cookies, encoding="utf-8")
+        args.extend(["--cookies", str(cookies_file)])
+        print("[script] YOUTUBE_COOKIES を検出 → --cookies を有効化")
+    return args
 
 # 構成パターン (5 種類からランダム選択)
 COMPOSITION_PATTERNS = [
@@ -93,6 +121,10 @@ def load_selected() -> dict[str, Any]:
 def fetch_video_metadata(video_url: str) -> dict[str, Any]:
     """yt-dlp で対象動画のメタデータを取得する。
 
+    GitHub Actions の IP 帯は YouTube に bot として検知されやすいので、
+    player_client=tv,web_safari,mweb,android の順に試行する。
+    YOUTUBE_COOKIES env が設定されている場合はさらに cookies を併用する。
+
     Args:
         video_url: 対象動画 URL
 
@@ -100,17 +132,28 @@ def fetch_video_metadata(video_url: str) -> dict[str, Any]:
         title / description / duration を含む辞書
     """
     print(f"[script] yt-dlp でメタデータ取得: {video_url}")
+    cmd = [
+        "yt-dlp", "--dump-json", "--skip-download",
+        *YT_DLP_BYPASS_ARGS,
+        *yt_dlp_extra_args(),
+        video_url,
+    ]
     try:
         result = subprocess.run(
-            ["yt-dlp", "--dump-json", "--skip-download", "--no-warnings", video_url],
+            cmd,
             capture_output=True,
             text=True,
-            timeout=60,
+            timeout=90,
             check=True,
             encoding="utf-8",
         )
     except subprocess.CalledProcessError as exc:
-        print(f"[script] FATAL: yt-dlp 失敗: {exc.stderr}")
+        print(f"[script] FATAL: yt-dlp 失敗: {exc.stderr[-2000:]}")
+        if "Sign in to confirm" in (exc.stderr or "") or "not a bot" in (exc.stderr or ""):
+            print(
+                "[script] HINT: YouTube が bot 検知。Secrets に YOUTUBE_COOKIES を設定 "
+                "(Netscape 形式 cookies.txt の全文) してください。"
+            )
         raise
     except subprocess.TimeoutExpired:
         print("[script] FATAL: yt-dlp タイムアウト")
@@ -191,14 +234,14 @@ JSON のみを出力してください。
 def call_gemini(prompt: str) -> str:
     """Gemini API を呼び出してレスポンステキストを返す。
 
-    指定モデルが見つからない / 廃止されている場合はフォールバックを試す。
+    新 SDK (google-genai) を使用。指定モデルが見つからない / 廃止されている
+    場合は段階的にフォールバックする。
     """
     if not GEMINI_API_KEY:
         raise RuntimeError("GEMINI_API_KEY が未設定")
-    genai.configure(api_key=GEMINI_API_KEY)
+    client = genai.Client(api_key=GEMINI_API_KEY)
 
     candidates = [GEMINI_MODEL, "gemini-2.0-flash", "gemini-1.5-flash"]
-    # 重複排除しつつ順序維持
     tried: list[str] = []
     for m in candidates:
         if m and m not in tried:
@@ -208,9 +251,11 @@ def call_gemini(prompt: str) -> str:
     for model_name in tried:
         try:
             print(f"[script] Gemini ({model_name}) 呼び出し ...")
-            model = genai.GenerativeModel(model_name)
-            resp = model.generate_content(prompt)
-            text = resp.text or ""
+            resp = client.models.generate_content(
+                model=model_name,
+                contents=prompt,
+            )
+            text = (resp.text or "").strip()
             if text:
                 return text
             print(f"[script] WARNING: {model_name} が空応答。次候補へ。")

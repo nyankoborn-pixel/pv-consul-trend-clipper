@@ -69,9 +69,19 @@ cd pv-consul-trend-clipper
 | `YOUTUBE_CLIENT_ID` | OAuth クライアント ID |
 | `YOUTUBE_CLIENT_SECRET` | OAuth クライアントシークレット |
 | `YOUTUBE_REFRESH_TOKEN` | OAuth リフレッシュトークン |
+| `YOUTUBE_COOKIES` | (任意) Netscape 形式 cookies.txt の全文。bot 検知された時の最終フォールバック |
 
 > logs/ への commit & push はワークフローの `GITHUB_TOKEN` (permissions: contents: write) で行うため、追加の PAT は不要です。
 > cron-job.org から workflow_dispatch を叩く用途だけ別途 GitHub PAT が必要 (リポジトリ Secrets ではなく cron-job.org 側に設定)。
+
+#### YOUTUBE_COOKIES の取得方法 (bot 検知された時用)
+
+GitHub Actions の IP 帯は YouTube に bot として検知されやすく、`Sign in to confirm you're not a bot` でエラーになることがあります。
+通常は `player_client=tv,web_safari,mweb,android` のフォールバックで回避しますが、それでも失敗する場合は cookies を渡してください。
+
+1. Chrome / Firefox の拡張機能 [Get cookies.txt LOCALLY](https://chromewebstore.google.com/detail/get-cookiestxt-locally/cclelndahbckbenkjhflpdbgdldlbecc) などを使い、`youtube.com` ドメインの cookies を Netscape 形式でエクスポート
+2. ファイル全文を `YOUTUBE_COOKIES` Secret に貼り付け
+3. ワークフロー側で自動的に `--cookies` に渡されます
 
 ### 4. cron-job.org にジョブ登録
 

@@ -41,5 +41,8 @@ Thumbs.db
 *.swp
 *~
 
+# Claude Code local settings / worktrees
+.claude/
+
 # ログ (jsonl は残す。デバッグ用 .log のみ無視)
 logs/*.log
