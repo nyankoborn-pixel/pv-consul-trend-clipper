@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import json
 import os
-import random
 import shutil
 import subprocess
 import sys
@@ -194,37 +193,18 @@ def download_video(url: str, dest: Path) -> Path:
 def cut_clip(src: Path, start_sec: float, end_sec: float, dest: Path) -> Path:
     """元動画から指定区間を 1080x1920 (フルスクリーン縦) / 元音声カットで切り出す。
 
+    - Gemini が指定した start_sec / end_sec をそのまま使う (ランダムシフトは廃止)。
+      総尺 45-60 秒を 20 秒クリップで賄う設計上、ループしても起点が固定なので
+      動きが連続して見える (ランダムだと毎回違う場所に飛んで動きが細切れになる)。
     - end_sec が動画長を超えていれば丸める
-    - start_sec≈0 で動画が要求の 2.5 倍以上長い場合は中盤からランダム切出し
     - 結果クリップが極端に短い場合 (< 3 s) はエラー
-    - 横長ソースは center crop で 1080x1920 に fit
+    - 横長ソースは bgblur + 中央 fit で 1080x1920 に合わせる (compose 段で実施)
     """
     try:
         actual_duration = ffprobe_duration(src)
     except Exception as exc:
         print(f"[make] WARNING: 元動画の duration 取得失敗 ({exc})。指定値で続行。")
         actual_duration = float("inf")
-
-    requested_duration = end_sec - start_sec
-
-    if (
-        actual_duration != float("inf")
-        and start_sec < 0.5
-        and actual_duration > requested_duration * 2.5
-        and requested_duration > 0
-    ):
-        lower = max(2.0, actual_duration * 0.10)
-        upper = max(lower + 1.0, actual_duration * 0.70 - requested_duration)
-        if upper > lower:
-            new_start = random.uniform(lower, upper)
-            new_end = new_start + requested_duration
-            if new_end <= actual_duration - 0.5:
-                print(
-                    f"[make] 元動画 {actual_duration:.1f}s は要求の {requested_duration:.1f}s "
-                    f"より十分長い → 静止画化対策で start を 0s → {new_start:.1f}s に変更"
-                )
-                start_sec = new_start
-                end_sec = new_end
 
     if end_sec > actual_duration:
         print(
