@@ -246,10 +246,10 @@ def cut_clip(src: Path, start_sec: float, end_sec: float, dest: Path) -> Path:
         raise RuntimeError(f"clip 長さ {duration:.2f}s が短すぎる (元動画が短い可能性)")
 
     print(f"[make] clip 切り出し: {start_sec}s - {end_sec}s ({duration}s)")
-    # 縦動画 1080x1920 に letterbox で fit (横長ソースは上下黒帯、絵を変形させない)
+    # 縦動画 1080x1920 に cover-crop でスケール (横長ソースは左右切る)
     vf = (
-        f"scale={W}:{H}:force_original_aspect_ratio=decrease,"
-        f"pad={W}:{H}:(ow-iw)/2:(oh-ih)/2:color=black,"
+        f"scale={W}:{H}:force_original_aspect_ratio=increase,"
+        f"crop={W}:{H},"
         f"setsar=1,fps={FPS}"
     )
     run(
