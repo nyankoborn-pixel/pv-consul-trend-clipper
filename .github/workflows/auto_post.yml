@@ -1,0 +1,149 @@
+name: Auto Post YouTube Shorts (Trend Clipper)
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "dry_run (true でアップロードをスキップ)"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: auto-post
+  cancel-in-progress: false
+
+jobs:
+  post:
+    name: Generate & post Shorts
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    services:
+      voicevox:
+        image: voicevox/voicevox_engine:cpu-ubuntu20.04-latest
+        ports:
+          - 50021:50021
+
+    env:
+      DRY_RUN: ${{ inputs.dry_run }}
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
+      YOUTUBE_CLIENT_ID: ${{ secrets.YOUTUBE_CLIENT_ID }}
+      YOUTUBE_CLIENT_SECRET: ${{ secrets.YOUTUBE_CLIENT_SECRET }}
+      YOUTUBE_REFRESH_TOKEN: ${{ secrets.YOUTUBE_REFRESH_TOKEN }}
+      VOICEVOX_URL: http://localhost:50021
+      FONT_PATH: /usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc
+      PYTHONUNBUFFERED: "1"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GH_PAT }}
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install system deps (ffmpeg, fonts)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            ffmpeg \
+            fonts-noto-cjk \
+            fonts-noto-cjk-extra
+          ffmpeg -version | head -n 1
+          fc-list | grep -i "noto" | head -n 5 || true
+
+      - name: Install Python deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install \
+            requests \
+            google-generativeai \
+            google-api-python-client \
+            google-auth-oauthlib \
+            google-auth \
+            feedparser \
+            pyyaml \
+            python-dateutil \
+            yt-dlp
+
+      - name: Wait for VOICEVOX engine
+        run: |
+          echo "Waiting for VOICEVOX engine on :50021 ..."
+          for i in $(seq 1 60); do
+            if curl -fsS http://localhost:50021/version > /dev/null 2>&1; then
+              echo "VOICEVOX engine is up."
+              curl -fsS http://localhost:50021/version
+              echo
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "VOICEVOX engine did not become ready in time"
+          exit 1
+
+      - name: Resolve font path
+        run: |
+          # 環境により .ttc / .otf の場所が異なるため fc-match で実体パスを取得
+          RESOLVED=$(fc-match -f "%{file}\n" "Noto Sans CJK JP:weight=bold" || true)
+          if [ -n "$RESOLVED" ] && [ -f "$RESOLVED" ]; then
+            echo "FONT_PATH=$RESOLVED" >> "$GITHUB_ENV"
+            echo "Resolved font: $RESOLVED"
+          else
+            echo "WARN: fc-match で日本語フォント解決失敗。FONT_PATH 既定値を使用。"
+          fi
+
+      - name: Step 1 — fetch_videos
+        run: python src/fetch_videos.py
+
+      - name: Step 2 — select_video
+        run: python src/select_video.py
+
+      - name: Step 3 — generate_script
+        run: python src/generate_script.py
+
+      - name: Step 4 — make_video
+        run: python src/make_video.py
+
+      - name: Step 5 — upload_youtube
+        run: python src/upload_youtube.py
+
+      - name: Upload artifact (output.mp4)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: output-${{ github.run_id }}
+          path: |
+            output.mp4
+            work/script.json
+            work/selected.json
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Commit logs
+        if: success()
+        run: |
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name  "github-actions[bot]"
+          if [ -d logs ] && [ -n "$(ls -A logs 2>/dev/null)" ]; then
+            git add logs/
+            if ! git diff --cached --quiet; then
+              git commit -m "chore(logs): post run $(date -u +%Y-%m-%dT%H:%M:%SZ) [skip ci]"
+              git push
+            else
+              echo "No log changes to commit."
+            fi
+          else
+            echo "No logs directory or empty."
+          fi
