@@ -263,6 +263,57 @@ def character_image_path(speaker: str, emotion: str) -> Path:
     raise FileNotFoundError(f"立ち絵が見つからない: {base} / {fallback}")
 
 
+def ensure_placeholder_assets(font_path: str) -> None:
+    """assets/{speaker}/{speaker}_{emotion}.png が無ければ ffmpeg で生成する。
+
+    本番運用では Boss が手動でアセットを配置するが、未配置時にもパイプラインを
+    動作確認できるよう、ffmpeg lavfi color + drawtext で簡易な PNG を作る。
+    既存ファイルは上書きしない。
+    """
+    speakers = [
+        ("nyanko", "0x4a90e2", "ニャンコ"),
+        ("zundamon", "0x68d391", "ずんだもん"),
+    ]
+    emotions = ("normal", "happy", "surprised", "thinking")
+    fontfile_arg = font_path.replace("\\", "/").replace(":", "\\:")
+
+    generated_any = False
+    for spk, color, label in speakers:
+        speaker_dir = ASSETS_DIR / spk
+        speaker_dir.mkdir(parents=True, exist_ok=True)
+        for emo in emotions:
+            target = speaker_dir / f"{spk}_{emo}.png"
+            if target.exists():
+                continue
+            display_text = f"{label} {emo}"
+            drawtext = (
+                f"drawtext=fontfile='{fontfile_arg}':"
+                f"text='{display_text}':"
+                f"fontcolor=white:fontsize=40:"
+                f"bordercolor=black:borderw=3:"
+                f"x=(w-text_w)/2:y=(h-text_h)/2"
+            )
+            run(
+                [
+                    "ffmpeg", "-y",
+                    "-f", "lavfi",
+                    "-i", f"color=c={color}:s=400x600:d=1",
+                    "-vf", drawtext,
+                    "-frames:v", "1",
+                    str(target),
+                ],
+                desc=f"placeholder PNG → {target.name}",
+            )
+            print(f"[make] WARNING: 立ち絵未配置のため placeholder を生成: {target}")
+            generated_any = True
+
+    if generated_any:
+        print(
+            "[make] NOTE: assets/ にプレースホルダ画像を生成しました。"
+            "本番運用時は assets/{nyanko,zundamon}/*.png を実画像に差し替えてください。"
+        )
+
+
 def wrap_jp_text(text: str, max_chars_per_line: int = SUBTITLE_WRAP_CHARS) -> str:
     """日本語テキストを max_chars_per_line で機械的に折り返す。
 
@@ -455,6 +506,12 @@ def main() -> int:
     except Exception as exc:
         print(f"[make] FATAL: フォント解決失敗: {exc}")
         return 99
+
+    # 立ち絵が未配置ならプレースホルダ PNG を生成 (動作確認用)
+    try:
+        ensure_placeholder_assets(font_path)
+    except Exception as exc:
+        print(f"[make] WARNING: placeholder 生成失敗: {exc} (続行)")
 
     try:
         script = load_script()
