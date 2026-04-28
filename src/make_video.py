@@ -282,12 +282,53 @@ def character_image_path(speaker: str, emotion: str) -> Path:
     if fallback.exists():
         print(f"[make] WARNING: {base.name} が無いので {fallback.name} を使用")
         return fallback
+    # emotion=="normal" だと base と fallback が同一パスを指すので順序維持で重複排除
+    search_paths = list(dict.fromkeys([str(base), str(fallback)]))
+    paths_block = "\n".join(f"  - {p}" for p in search_paths)
     raise FileNotFoundError(
-        "立ち絵 PNG が配置されていません。次のいずれかのパスに PNG を配置してください:\n"
-        f"  - {base}\n"
-        f"  - {fallback}\n"
+        "立ち絵 PNG が配置されていません。次のパスに PNG を配置してください:\n"
+        f"{paths_block}\n"
         "(プレースホルダ自動生成は廃止されました。本番アセットを必ず配置してください)"
     )
+
+
+def verify_required_assets(script: dict[str, Any]) -> int:
+    """script.json の全シーンが要求する立ち絵 PNG が揃っているか早期チェック。
+
+    各シーンで primary ({speaker}_{emotion}.png) と fallback ({speaker}_normal.png)
+    のどちらも無いものを集めて一括レポート。VOICEVOX 合成や ffmpeg 起動前に止める。
+
+    Returns:
+        0  : 全シーン解決可能
+        11 : 1 件でも解決不能あり (main() がそのまま return code として使う)
+    """
+    scenes = script.get("scenes", [])
+    issues: list[tuple[int, str, str, Path]] = []
+    for i, sc in enumerate(scenes):
+        speaker = sc.get("speaker") or ""
+        emotion = sc.get("emotion") or "normal"
+        primary = ASSETS_DIR / speaker / f"{speaker}_{emotion}.png"
+        fallback = ASSETS_DIR / speaker / f"{speaker}_normal.png"
+        if primary.exists() or fallback.exists():
+            continue
+        issues.append((i, speaker, emotion, primary))
+
+    if not issues:
+        print(f"[make] 立ち絵チェック OK: 全 {len(scenes)} シーンで PNG 解決可能")
+        return 0
+
+    # 配置すべきユニークなパス (順序維持)
+    missing_unique = list(dict.fromkeys(p for _, _, _, p in issues))
+    affected = ", ".join(f"scene[{i}]({sp},{em})" for i, sp, em, _ in issues)
+    print(
+        f"[make] FATAL: 立ち絵 PNG 不足。{len(missing_unique)} ファイル要配置、"
+        f"{len(issues)} シーンが解決不能:"
+    )
+    for p in missing_unique:
+        print(f"  - {p}")
+    print(f"[make]   該当シーン: {affected}")
+    print("[make] (VOICEVOX 合成前に検出。assets/ に PNG を配置してください)")
+    return 11
 
 
 def wrap_jp_text(text: str, max_chars_per_line: int = SUBTITLE_WRAP_CHARS) -> str:
@@ -481,6 +522,11 @@ def main() -> int:
     except Exception as exc:
         print(f"[make] FATAL: script 読み込み失敗: {exc}")
         return 1
+
+    # 立ち絵 PNG 不足を VOICEVOX 合成や clip ダウンロード前に検出
+    rc = verify_required_assets(script)
+    if rc != 0:
+        return rc
 
     meta = script["_meta"]
     media_url = meta.get("media_url") or ""
