@@ -19,6 +19,7 @@ import os
 import random
 import re
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -188,17 +189,40 @@ JSON のみを出力してください。
 """
 
 
+def _is_transient_error(exc: Exception) -> bool:
+    """503 UNAVAILABLE / 429 RESOURCE_EXHAUSTED など一時的なエラーを判定する。"""
+    s = str(exc)
+    return any(
+        marker in s
+        for marker in ("503", "UNAVAILABLE", "429", "RESOURCE_EXHAUSTED", "DEADLINE_EXCEEDED")
+    )
+
+
+def _is_model_gone(exc: Exception) -> bool:
+    """404 NOT_FOUND など『そのモデルは使えない』系エラーを判定する。"""
+    s = str(exc)
+    return ("404" in s and "NOT_FOUND" in s) or "no longer available" in s
+
+
 def call_gemini(prompt: str) -> str:
     """Gemini API を呼び出してレスポンステキストを返す。
 
-    新 SDK (google-genai) を使用。指定モデルが見つからない / 廃止されている
-    場合は段階的にフォールバックする。
+    新 SDK (google-genai) を使用。
+    - 503 / 429 / DEADLINE_EXCEEDED は同一モデルで指数バックオフ最大3回リトライ
+    - 404 NOT_FOUND は次のフォールバックモデルへ即座に移る
+    - フォールバック順: env GEMINI_MODEL → 2.5-flash → 2.5-flash-lite → 2.5-pro
+      旧 1.5-flash / 2.0-flash は新規ユーザーに非提供になっているため除外。
     """
     if not GEMINI_API_KEY:
         raise RuntimeError("GEMINI_API_KEY が未設定")
     client = genai.Client(api_key=GEMINI_API_KEY)
 
-    candidates = [GEMINI_MODEL, "gemini-2.0-flash", "gemini-1.5-flash"]
+    candidates = [
+        GEMINI_MODEL,
+        "gemini-2.5-flash",
+        "gemini-2.5-flash-lite",
+        "gemini-2.5-pro",
+    ]
     tried: list[str] = []
     for m in candidates:
         if m and m not in tried:
@@ -206,20 +230,33 @@ def call_gemini(prompt: str) -> str:
 
     last_exc: Exception | None = None
     for model_name in tried:
-        try:
-            print(f"[script] Gemini ({model_name}) 呼び出し ...")
-            resp = client.models.generate_content(
-                model=model_name,
-                contents=prompt,
-            )
-            text = (resp.text or "").strip()
-            if text:
-                return text
-            print(f"[script] WARNING: {model_name} が空応答。次候補へ。")
-        except Exception as exc:
-            print(f"[script] WARNING: {model_name} 呼び出し失敗: {exc}")
-            last_exc = exc
-            continue
+        for attempt in range(1, 4):  # 同一モデル最大3回
+            try:
+                print(f"[script] Gemini ({model_name}) 呼び出し attempt={attempt} ...")
+                resp = client.models.generate_content(
+                    model=model_name,
+                    contents=prompt,
+                )
+                text = (resp.text or "").strip()
+                if text:
+                    return text
+                print(f"[script] WARNING: {model_name} attempt={attempt} 空応答。")
+                last_exc = RuntimeError(f"{model_name} returned empty text")
+            except Exception as exc:
+                last_exc = exc
+                if _is_model_gone(exc):
+                    print(f"[script] {model_name} は使用不可 (404)。次候補へ。")
+                    break  # 次のモデルへ
+                if _is_transient_error(exc) and attempt < 3:
+                    backoff = 2 ** attempt  # 2s, 4s
+                    print(
+                        f"[script] WARNING: {model_name} attempt={attempt} 一時失敗 "
+                        f"({exc.__class__.__name__})。{backoff}s 待って再試行。"
+                    )
+                    time.sleep(backoff)
+                    continue
+                print(f"[script] WARNING: {model_name} attempt={attempt} 失敗: {exc}")
+                break  # その他エラー or 最終 attempt → 次のモデルへ
     if last_exc:
         raise last_exc
     raise RuntimeError("Gemini が全候補モデルで応答なし")
