@@ -22,7 +22,10 @@ concurrency:
 jobs:
   post:
     name: Generate & post Shorts
-    runs-on: ubuntu-latest
+    # TEMP: 2026-04-28 GitHub Actions の障害で ubuntu-latest / ubuntu-24.02 が
+    # 高 wait time。ubuntu-22.04 は影響外なので一時切替。
+    # 障害復旧後は ubuntu-latest に戻すこと (https://www.githubstatus.com/ で確認)。
+    runs-on: ubuntu-22.04
     timeout-minutes: 30
 
     services:
