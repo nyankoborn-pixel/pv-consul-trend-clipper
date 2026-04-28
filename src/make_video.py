@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import shutil
 import subprocess
 import sys
@@ -169,14 +170,41 @@ def download_video(url: str, dest: Path) -> Path:
 def cut_clip(src: Path, start_sec: float, end_sec: float, dest: Path) -> Path:
     """元動画から指定区間を 1080x960 / 元音声カットで切り出す。
 
-    実動画長を ffprobe で取得し、end_sec が動画長を超えていれば丸める。
-    結果クリップが極端に短い場合 (< 3 s) はエラーにする。
+    実動画長を ffprobe で取得し:
+    - end_sec が動画長を超えていれば丸める
+    - start_sec がほぼ 0 で動画が要求より十分長い場合、中盤からランダム切り出し
+      (NASA slow-motion 系は冒頭が静止しがちなので variety を確保)
+    - 結果クリップが極端に短い場合 (< 3 s) はエラー
     """
     try:
         actual_duration = ffprobe_duration(src)
     except Exception as exc:
         print(f"[make] WARNING: 元動画の duration 取得失敗 ({exc})。指定値で続行。")
         actual_duration = float("inf")
+
+    requested_duration = end_sec - start_sec
+
+    # 動画が要求の 2.5 倍以上長く、start_sec がほぼ 0 (デフォルト) なら
+    # 中盤からランダム位置を選択 (静止画化対策)
+    if (
+        actual_duration != float("inf")
+        and start_sec < 0.5
+        and actual_duration > requested_duration * 2.5
+        and requested_duration > 0
+    ):
+        # 動画の 10%〜70% の範囲でランダム start
+        lower = max(2.0, actual_duration * 0.10)
+        upper = max(lower + 1.0, actual_duration * 0.70 - requested_duration)
+        if upper > lower:
+            new_start = random.uniform(lower, upper)
+            new_end = new_start + requested_duration
+            if new_end <= actual_duration - 0.5:
+                print(
+                    f"[make] 元動画 {actual_duration:.1f}s は要求の {requested_duration:.1f}s "
+                    f"より十分長い → 静止画化対策で start を 0s → {new_start:.1f}s に変更"
+                )
+                start_sec = new_start
+                end_sec = new_end
 
     if end_sec > actual_duration:
         print(
@@ -330,6 +358,26 @@ def wrap_jp_text(text: str, max_chars_per_line: int = SUBTITLE_WRAP_CHARS) -> st
     return "\n".join(out_lines)
 
 
+def escape_drawtext_text(text: str) -> str:
+    """ffmpeg drawtext text= の値用にエスケープする。
+
+    引用符を使わず、特殊文字をすべて \\ でエスケープする方式。
+    改行は \\n エスケープに変換 (drawtext がこれを改行として解釈)。
+    最初に \\ をエスケープする順序が重要 (後で追加される \\ を二重エスケープしないため)。
+    """
+    text = text.replace("\\", "\\\\")
+    text = text.replace(":", "\\:")
+    text = text.replace(",", "\\,")
+    text = text.replace(";", "\\;")
+    text = text.replace("'", "\\'")
+    text = text.replace("%", "\\%")
+    text = text.replace("[", "\\[")
+    text = text.replace("]", "\\]")
+    text = text.replace("=", "\\=")
+    text = text.replace("\n", "\\n")
+    return text
+
+
 def render_scene_bottom(
     speaker: str,
     emotion: str,
@@ -345,29 +393,31 @@ def render_scene_bottom(
 
     出力: 1080x960 / 30fps / aac 音声付き
 
-    drawtext は textfile パラメータでテキストを渡し、フィルタ文字列内での
-    クォート・コロン・カンマのエスケープ問題を回避する。
+    drawtext は text= 直書き + 全特殊文字エスケープ方式。
+    textfile= は環境差で silently 機能しないことがあるため使わない。
     """
     char_img = character_image_path(speaker, emotion)
 
-    # 字幕テキストを折返し → ファイル化 (drawtext textfile 用)
+    # 字幕テキストを折返し → drawtext text= 用にエスケープ
     wrapped = wrap_jp_text(text)
+    escaped_text = escape_drawtext_text(wrapped)
+    # デバッグ: textfile も同時に書いておく (artifact から確認可能)
     text_file = text_dir / f"scene_{scene_index:02d}_text.txt"
     text_file.write_text(wrapped, encoding="utf-8")
+    print(f"[make] scene[{scene_index}] subtitle: {wrapped!r}")
 
-    # ffmpeg フィルタ用にパス区切りを正規化 (Windows ローカル開発も考慮)
+    # ffmpeg フィルタ用にフォントパスを正規化 (Windows ローカル開発も考慮)
     fontfile_arg = font_path.replace("\\", "/").replace(":", "\\:")
-    textfile_arg = str(text_file.resolve()).replace("\\", "/").replace(":", "\\:")
 
     # 立ち絵: 高さ 700px にリサイズ (アスペクト比維持)
     # 字幕: 画面下部中央、白文字 + 黒縁、自動折返し済み
     filter_complex = (
         f"[0:v]format=yuv420p[bg];"
         f"[1:v]scale=-1:700[char];"
-        f"[bg][char]overlay=(W-w)/2:30:format=auto[withchar];"
+        f"[bg][char]overlay=(W-w)/2:30[withchar];"
         f"[withchar]drawtext="
         f"fontfile='{fontfile_arg}':"
-        f"textfile='{textfile_arg}':"
+        f"text={escaped_text}:"
         f"fontcolor=white:"
         f"fontsize={SUBTITLE_FONTSIZE}:"
         f"line_spacing={SUBTITLE_LINE_SPACING}:"
