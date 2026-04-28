@@ -238,13 +238,18 @@ def cut_clip(src: Path, start_sec: float, end_sec: float, dest: Path) -> Path:
         raise RuntimeError(f"clip 長さ {duration:.2f}s が短すぎる (元動画が短い可能性)")
 
     print(f"[make] clip 切り出し: {start_sec}s - {end_sec}s ({duration}s)")
-    # letterbox: 元アスペクト比を保持したまま 1080x1920 内に収める (中央配置、上下黒帯)。
-    # 横長 16:9 ソースは 1080x607 になり、上下に約 656px ずつ黒帯が出る。
-    # 元動画の全体を切らずに見せる方針 (Boss 要望: 横長動画の縦横比そのまま中央表示)。
-    vf = (
-        f"scale={W}:{H}:force_original_aspect_ratio=decrease,"
-        f"pad={W}:{H}:(ow-iw)/2:(oh-ih)/2:color=black,"
-        f"setsar=1,fps={FPS}"
+    # 背景ぼかし + 中央配置 (TikTok/Shorts 定番、GPT 推奨):
+    # - bg: 元動画を 1080x1920 にカバー (cover-crop) してガウシアンぼかし
+    # - fg: 元動画を縦横比保持で 1080x1920 に decrease で fit
+    # - overlay: bgblur に fgfit を中央重ね
+    # 黒帯のまま放置するより一体感が出て、被写体は元アスペクト比のまま全体可視。
+    filter_complex = (
+        f"[0:v]split=2[bg][fg];"
+        f"[bg]scale={W}:{H}:force_original_aspect_ratio=increase,"
+        f"crop={W}:{H},gblur=sigma=20[bgblur];"
+        f"[fg]scale={W}:{H}:force_original_aspect_ratio=decrease[fgfit];"
+        f"[bgblur][fgfit]overlay=(W-w)/2:(H-h)/2,"
+        f"setsar=1,fps={FPS}[out]"
     )
     run(
         [
@@ -253,7 +258,8 @@ def cut_clip(src: Path, start_sec: float, end_sec: float, dest: Path) -> Path:
             "-i", str(src),
             "-t", str(duration),
             "-an",
-            "-vf", vf,
+            "-filter_complex", filter_complex,
+            "-map", "[out]",
             "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
             "-pix_fmt", "yuv420p",
             str(dest),
