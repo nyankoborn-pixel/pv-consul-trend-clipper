@@ -427,14 +427,18 @@ def compose_scene(
     # 長文で text_h が大きい場合に下端からはみ出さないよう、
     # フレーム下端 - BOTTOM_SAFE - text_h を上限としてクランプ。
     #
-    # 注意: ffmpeg drawtext の y= は filter parser が先に解釈するため、
-    # Python 側の算術式 (例: "1430+40") をそのまま渡すと
-    # "No such filter: '1430+40'" でパースエラーになる。
-    # 定数演算は Python 側で事前評価し、リテラル数値だけ渡す。
-    # text_h は drawtext 自身が解決する変数なので残してよい。
+    # 注意 1: ffmpeg drawtext の y= は filter parser が先に解釈するため、
+    #   Python 側の算術式 (例: "1430+40") をそのまま渡すと
+    #   "No such filter: '1430+40'" でパースエラーになる。
+    #   定数演算は Python 側で事前評価し、リテラル数値だけ渡す。
+    #   text_h は drawtext 自身が解決する変数なので残してよい。
+    # 注意 2: min(a,b) の中のカンマは filter chain の区切り (",") として
+    #   ffmpeg parser が誤認するため "No such filter: '1470'" でエラーになる。
+    #   シングルクォートで全体を囲むと literal として扱われる
+    #   (同ファイルの fontfile='...' と同じ機構)。
     subtitle_y_top = SUBTITLE_BAND_Y + SUBTITLE_TOP_PAD          # 1470
     subtitle_y_max = H - SUBTITLE_BOTTOM_SAFE                    # 1850
-    subtitle_y_expr = f"min({subtitle_y_max}-text_h,{subtitle_y_top})"
+    subtitle_y_expr = f"'min({subtitle_y_max}-text_h,{subtitle_y_top})'"
 
     filter_complex = (
         # ベース動画 (1080x1920) を yuv420p に正規化
