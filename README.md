@@ -69,7 +69,9 @@ cd pv-consul-trend-clipper
 | `YOUTUBE_CLIENT_ID` | OAuth クライアント ID |
 | `YOUTUBE_CLIENT_SECRET` | OAuth クライアントシークレット |
 | `YOUTUBE_REFRESH_TOKEN` | OAuth リフレッシュトークン |
-| `GH_PAT` | logs/ commit & push 用の Personal Access Token (repo scope) |
+
+> logs/ への commit & push はワークフローの `GITHUB_TOKEN` (permissions: contents: write) で行うため、追加の PAT は不要です。
+> cron-job.org から workflow_dispatch を叩く用途だけ別途 GitHub PAT が必要 (リポジトリ Secrets ではなく cron-job.org 側に設定)。
 
 ### 4. cron-job.org にジョブ登録
 
