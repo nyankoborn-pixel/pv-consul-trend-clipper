@@ -34,9 +34,6 @@ SCRIPT_PATH = WORK_DIR / "script.json"
 OUTPUT_PATH = ROOT / "output.mp4"
 
 VOICEVOX_URL = os.environ.get("VOICEVOX_URL", "http://localhost:50021")
-FONT_PATH = os.environ.get(
-    "FONT_PATH", "/usr/share/fonts/truetype/noto/NotoSansCJK-Bold.ttc"
-)
 BGM_PATH = ASSETS_DIR / "bgm.mp3"
 BGM_VOLUME_DB = -12.0
 
@@ -46,11 +43,55 @@ H = 1920
 HALF_H = H // 2  # 960
 FPS = 30
 
+# 字幕レイアウト
+SUBTITLE_FONTSIZE = 44
+SUBTITLE_WRAP_CHARS = 18  # 1 行あたり最大文字数
+SUBTITLE_LINE_SPACING = 12
+
 # キャラ → VOICEVOX speaker_id
 SPEAKER_IDS = {
     "zundamon": 3,
     "nyanko": 13,  # 青山龍星
 }
+
+# ffmpeg 色指定 (lavfi color source は 0xRRGGBB を確実に解釈)
+BG_COLOR = "0x1a1a2e"
+
+# 日本語フォントの探索候補 (FONT_PATH env が無効なら順に探す)
+FONT_CANDIDATES = [
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc",
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/truetype/noto/NotoSansCJK-Bold.ttc",
+    "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/opentype/noto/NotoSansCJKjp-Bold.otf",
+    "/usr/share/fonts/opentype/noto/NotoSansCJKjp-Regular.otf",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",  # 最終フォールバック (日本語不可)
+    "C:/Windows/Fonts/YuGothM.ttc",  # ローカル Windows 開発用
+    "C:/Windows/Fonts/meiryo.ttc",
+]
+
+
+def resolve_font_path() -> str:
+    """日本語フォントの実体パスを解決する。
+
+    FONT_PATH env が指す実ファイルが存在すればそれを使用、
+    存在しなければ FONT_CANDIDATES を順に探索する。
+    """
+    env_path = os.environ.get("FONT_PATH", "").strip()
+    if env_path and Path(env_path).is_file():
+        print(f"[make] フォント (env): {env_path}")
+        return env_path
+    for cand in FONT_CANDIDATES:
+        if Path(cand).is_file():
+            if "DejaVu" in cand:
+                print(f"[make] WARNING: 日本語フォント未検出。{cand} で代用 (字化け可能性)")
+            else:
+                print(f"[make] フォント検出: {cand}")
+            return cand
+    raise FileNotFoundError(
+        "日本語フォントが見つかりません。FONT_PATH env を設定するか、"
+        "Ubuntu なら 'apt install fonts-noto-cjk' を実行してください。"
+    )
 
 
 def load_script() -> dict[str, Any]:
@@ -121,8 +162,8 @@ def cut_clip(src: Path, start_sec: float, end_sec: float, dest: Path) -> Path:
     # 上半分の解像度に揃える: 1080x960、アスペクト比保持で fit + pad
     vf = (
         f"scale={W}:{HALF_H}:force_original_aspect_ratio=decrease,"
-        f"pad={W}:{HALF_H}:(ow-iw)/2:(oh-ih)/2:color=black,"
-        f"fps={FPS}"
+        f"pad={W}:{HALF_H}:(ow-iw)/2:(oh-ih)/2:color=0x000000,"
+        f"setsar=1,fps={FPS}"
     )
     run(
         [
@@ -186,17 +227,20 @@ def character_image_path(speaker: str, emotion: str) -> Path:
     raise FileNotFoundError(f"立ち絵が見つからない: {base} / {fallback}")
 
 
-def escape_drawtext(text: str) -> str:
-    """ffmpeg drawtext 用にテキストをエスケープする。"""
-    # バックスラッシュ → コロン → シングルクォート → カンマ → セミコロン → パーセント
-    return (
-        text.replace("\\", "\\\\")
-        .replace(":", "\\:")
-        .replace("'", "’")  # シングルクォートは右シングル引用符に置換
-        .replace(",", "，")
-        .replace(";", "；")
-        .replace("%", "％")
-    )
+def wrap_jp_text(text: str, max_chars_per_line: int = SUBTITLE_WRAP_CHARS) -> str:
+    """日本語テキストを max_chars_per_line で機械的に折り返す。
+
+    句読点や英単語境界を考慮した高度な折返しはしない (Shorts 字幕は短文前提)。
+    """
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    out_lines: list[str] = []
+    for line in text.split("\n"):
+        if not line:
+            out_lines.append("")
+            continue
+        for i in range(0, len(line), max_chars_per_line):
+            out_lines.append(line[i:i + max_chars_per_line])
+    return "\n".join(out_lines)
 
 
 def render_scene_bottom(
@@ -206,31 +250,51 @@ def render_scene_bottom(
     audio_path: Path,
     duration: float,
     dest: Path,
+    font_path: str,
+    text_dir: Path,
+    scene_index: int,
 ) -> Path:
     """シーンごとの下半分動画 (立ち絵 + 字幕 + 音声) を生成する。
 
     出力: 1080x960 / 30fps / aac 音声付き
+
+    drawtext は textfile パラメータでテキストを渡し、フィルタ文字列内での
+    クォート・コロン・カンマのエスケープ問題を回避する。
     """
     char_img = character_image_path(speaker, emotion)
-    safe_text = escape_drawtext(text)
 
-    # 立ち絵: 中央配置、高さ 700px にリサイズ
-    # 字幕: 画面下部中央、白文字 + 黒縁
-    # font size 56
+    # 字幕テキストを折返し → ファイル化 (drawtext textfile 用)
+    wrapped = wrap_jp_text(text)
+    text_file = text_dir / f"scene_{scene_index:02d}_text.txt"
+    text_file.write_text(wrapped, encoding="utf-8")
+
+    # ffmpeg フィルタ用にパス区切りを正規化 (Windows ローカル開発も考慮)
+    fontfile_arg = font_path.replace("\\", "/").replace(":", "\\:")
+    textfile_arg = str(text_file.resolve()).replace("\\", "/").replace(":", "\\:")
+
+    # 立ち絵: 高さ 700px にリサイズ (アスペクト比維持)
+    # 字幕: 画面下部中央、白文字 + 黒縁、自動折返し済み
     filter_complex = (
-        f"color=c=#1a1a2e:s={W}x{HALF_H}:d={duration}:r={FPS}[bg];"
+        f"[0:v]format=yuv420p[bg];"
         f"[1:v]scale=-1:700[char];"
-        f"[bg][char]overlay=(W-w)/2:30[withchar];"
-        f"[withchar]drawtext=fontfile='{FONT_PATH}':text='{safe_text}':"
-        f"fontcolor=white:fontsize=56:bordercolor=black:borderw=4:"
-        f"x=(w-text_w)/2:y=h-text_h-40[v]"
+        f"[bg][char]overlay=(W-w)/2:30:format=auto[withchar];"
+        f"[withchar]drawtext="
+        f"fontfile='{fontfile_arg}':"
+        f"textfile='{textfile_arg}':"
+        f"fontcolor=white:"
+        f"fontsize={SUBTITLE_FONTSIZE}:"
+        f"line_spacing={SUBTITLE_LINE_SPACING}:"
+        f"bordercolor=black:borderw=3:"
+        f"x=(w-text_w)/2:"
+        f"y=h-text_h-40[v]"
     )
 
     run(
         [
             "ffmpeg", "-y",
-            "-f", "lavfi", "-i", f"color=c=#1a1a2e:s={W}x{HALF_H}:d={duration}",
-            "-loop", "1", "-i", str(char_img),
+            "-f", "lavfi",
+            "-i", f"color=c={BG_COLOR}:s={W}x{HALF_H}:d={duration}:r={FPS}",
+            "-loop", "1", "-t", str(duration), "-i", str(char_img),
             "-i", str(audio_path),
             "-filter_complex", filter_complex,
             "-map", "[v]", "-map", "2:a",
@@ -296,12 +360,11 @@ def vstack_with_bgm(
         print(f"[make] WARNING: BGM が見つからない ({BGM_PATH})。BGMなしで出力。")
 
     if has_bgm:
-        # 入力: top, bottom, bgm
+        # 入力: top, bottom, bgm (BGM は -stream_loop -1 で input 段階で無限ループ)
         # 音声: bottom音声 + bgm (-12dB) を amix
-        bgm_volume_factor = 10 ** (BGM_VOLUME_DB / 20.0)  # ≈ 0.251
         filter_complex = (
             f"[0:v][1:v]vstack=inputs=2[v];"
-            f"[2:a]volume={bgm_volume_factor:.4f},aloop=loop=-1:size=2e9[bgm];"
+            f"[2:a]volume={BGM_VOLUME_DB}dB[bgm];"
             f"[1:a][bgm]amix=inputs=2:duration=first:dropout_transition=0[a]"
         )
         run(
@@ -309,7 +372,7 @@ def vstack_with_bgm(
                 "ffmpeg", "-y",
                 "-i", str(top),
                 "-i", str(bottom),
-                "-i", str(BGM_PATH),
+                "-stream_loop", "-1", "-i", str(BGM_PATH),
                 "-filter_complex", filter_complex,
                 "-map", "[v]", "-map", "[a]",
                 "-t", str(total_duration),
@@ -348,7 +411,14 @@ def main() -> int:
         for sub in ("scenes",):
             shutil.rmtree(WORK_DIR / sub, ignore_errors=True)
     WORK_DIR.mkdir(parents=True, exist_ok=True)
-    (WORK_DIR / "scenes").mkdir(parents=True, exist_ok=True)
+    scenes_dir = WORK_DIR / "scenes"
+    scenes_dir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        font_path = resolve_font_path()
+    except Exception as exc:
+        print(f"[make] FATAL: フォント解決失敗: {exc}")
+        return 99
 
     try:
         script = load_script()
@@ -387,7 +457,7 @@ def main() -> int:
             print(f"[make] FATAL: unknown speaker={speaker}")
             return 4
 
-        audio_path = WORK_DIR / "scenes" / f"scene_{i:02d}.wav"
+        audio_path = scenes_dir / f"scene_{i:02d}.wav"
         try:
             voicevox_synthesize(text, speaker_id, audio_path)
         except Exception as exc:
@@ -402,9 +472,19 @@ def main() -> int:
         # 末尾に余韻 0.3s
         duration += 0.3
 
-        scene_video = WORK_DIR / "scenes" / f"scene_{i:02d}.mp4"
+        scene_video = scenes_dir / f"scene_{i:02d}.mp4"
         try:
-            render_scene_bottom(speaker, emotion, text, audio_path, duration, scene_video)
+            render_scene_bottom(
+                speaker=speaker,
+                emotion=emotion,
+                text=text,
+                audio_path=audio_path,
+                duration=duration,
+                dest=scene_video,
+                font_path=font_path,
+                text_dir=scenes_dir,
+                scene_index=i,
+            )
         except Exception as exc:
             print(f"[make] FATAL: scene[{i}] 描画失敗: {exc}")
             return 7

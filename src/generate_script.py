@@ -189,16 +189,38 @@ JSON のみを出力してください。
 
 
 def call_gemini(prompt: str) -> str:
-    """Gemini API を呼び出してレスポンステキストを返す。"""
+    """Gemini API を呼び出してレスポンステキストを返す。
+
+    指定モデルが見つからない / 廃止されている場合はフォールバックを試す。
+    """
     if not GEMINI_API_KEY:
         raise RuntimeError("GEMINI_API_KEY が未設定")
     genai.configure(api_key=GEMINI_API_KEY)
-    model = genai.GenerativeModel(GEMINI_MODEL)
-    print(f"[script] Gemini ({GEMINI_MODEL}) 呼び出し ...")
-    resp = model.generate_content(prompt)
-    text = resp.text or ""
-    print(f"[script] Gemini レスポンス: {len(text)} chars")
-    return text
+
+    candidates = [GEMINI_MODEL, "gemini-2.0-flash", "gemini-1.5-flash"]
+    # 重複排除しつつ順序維持
+    tried: list[str] = []
+    for m in candidates:
+        if m and m not in tried:
+            tried.append(m)
+
+    last_exc: Exception | None = None
+    for model_name in tried:
+        try:
+            print(f"[script] Gemini ({model_name}) 呼び出し ...")
+            model = genai.GenerativeModel(model_name)
+            resp = model.generate_content(prompt)
+            text = resp.text or ""
+            if text:
+                return text
+            print(f"[script] WARNING: {model_name} が空応答。次候補へ。")
+        except Exception as exc:
+            print(f"[script] WARNING: {model_name} 呼び出し失敗: {exc}")
+            last_exc = exc
+            continue
+    if last_exc:
+        raise last_exc
+    raise RuntimeError("Gemini が全候補モデルで応答なし")
 
 
 def extract_json(text: str) -> dict[str, Any]:
