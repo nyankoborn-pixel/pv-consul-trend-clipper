@@ -67,16 +67,7 @@ jobs:
       - name: Install Python deps
         run: |
           python -m pip install --upgrade pip
-          pip install \
-            requests \
-            google-generativeai \
-            google-api-python-client \
-            google-auth-oauthlib \
-            google-auth \
-            feedparser \
-            pyyaml \
-            python-dateutil \
-            yt-dlp
+          pip install -r requirements.txt
 
       - name: Wait for VOICEVOX engine
         run: |
