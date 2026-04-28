@@ -367,7 +367,16 @@ def wrap_jp_text(text: str, max_chars_per_line: int = SUBTITLE_WRAP_CHARS) -> st
 
 
 def escape_drawtext_text(text: str) -> str:
-    """ffmpeg drawtext text= の値用にエスケープする (引用符を使わない方式)。"""
+    """ffmpeg drawtext text= の値用にエスケープする (引用符を使わない方式)。
+
+    改行処理に注意:
+    drawtext で改行させるには text= の値に `\\n` (2 バイト: \\, n) が届く必要がある。
+    だが filter parser が先に走り、`\\X` パターンを「次の文字を literal」と解釈して
+    `\\` を喰うため、`\\n` (2 バイト) を渡すと drawtext には `n` (1 バイト) しか届かず
+    1 行のまま 'n' という文字として描画されてしまう。
+    drawtext に `\\n` を届けるには、filter parser に `\\\\n` (3 バイト: \\, \\, n) を
+    渡す必要がある。Python 文字列リテラル `"\\\\\\\\n"` は 3 文字 `\\\\n` を表す。
+    """
     text = text.replace("\\", "\\\\")
     text = text.replace(":", "\\:")
     text = text.replace(",", "\\,")
@@ -377,7 +386,7 @@ def escape_drawtext_text(text: str) -> str:
     text = text.replace("[", "\\[")
     text = text.replace("]", "\\]")
     text = text.replace("=", "\\=")
-    text = text.replace("\n", "\\n")
+    text = text.replace("\n", "\\\\n")
     return text
 
 
