@@ -238,13 +238,12 @@ def cut_clip(src: Path, start_sec: float, end_sec: float, dest: Path) -> Path:
         raise RuntimeError(f"clip 長さ {duration:.2f}s が短すぎる (元動画が短い可能性)")
 
     print(f"[make] clip 切り出し: {start_sec}s - {end_sec}s ({duration}s)")
-    # cover-crop: 元アスペクト比を保持したまま 1080x1920 を中央クロップで充填。
-    # YouTube Shorts 推奨方式 (force_original_aspect_ratio=increase + crop)。
-    # 立ち絵を廃止したので被写体被覆は字幕帯の 13% のみ、cover-crop で
-    # 多少左右が切れても画面全体が映像で埋まり、被写体は中央に維持される。
+    # letterbox: 元アスペクト比を保持したまま 1080x1920 内に収める (中央配置、上下黒帯)。
+    # 横長 16:9 ソースは 1080x607 になり、上下に約 656px ずつ黒帯が出る。
+    # 元動画の全体を切らずに見せる方針 (Boss 要望: 横長動画の縦横比そのまま中央表示)。
     vf = (
-        f"scale={W}:{H}:force_original_aspect_ratio=increase,"
-        f"crop={W}:{H},"
+        f"scale={W}:{H}:force_original_aspect_ratio=decrease,"
+        f"pad={W}:{H}:(ow-iw)/2:(oh-ih)/2:color=black,"
         f"setsar=1,fps={FPS}"
     )
     run(
