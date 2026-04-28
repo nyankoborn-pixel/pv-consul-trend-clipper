@@ -34,11 +34,14 @@ jobs:
     env:
       DRY_RUN: ${{ inputs.dry_run }}
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-      YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
+      # ソース API キー (Pixabay / Pexels は必須、NASA は任意)
+      PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
+      PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
+      NASA_API_KEY: ${{ secrets.NASA_API_KEY }}
+      # YouTube アップロード用 OAuth
       YOUTUBE_CLIENT_ID: ${{ secrets.YOUTUBE_CLIENT_ID }}
       YOUTUBE_CLIENT_SECRET: ${{ secrets.YOUTUBE_CLIENT_SECRET }}
       YOUTUBE_REFRESH_TOKEN: ${{ secrets.YOUTUBE_REFRESH_TOKEN }}
-      YOUTUBE_COOKIES: ${{ secrets.YOUTUBE_COOKIES }}
       VOICEVOX_URL: http://localhost:50021
       PYTHONUNBUFFERED: "1"
 

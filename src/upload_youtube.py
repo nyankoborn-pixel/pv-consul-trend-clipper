@@ -38,7 +38,7 @@ REFRESH_TOKEN = os.environ.get("YOUTUBE_REFRESH_TOKEN", "")
 
 CATEGORY_ID = "28"  # Science & Technology
 DEFAULT_TAGS = [
-    "Shorts", "衝撃映像", "ニュース", "NASA", "宇宙",
+    "Shorts", "衝撃映像", "ニュース", "自然災害", "宇宙", "NASA",
     "ニャンコンサル", "ずんだもん",
 ]
 
@@ -48,18 +48,21 @@ DESCRIPTION_TEMPLATE = """{title}
 
 ▼ 元映像
 {original_title}
-{video_url}
+{page_url}
 出典: {source_name}
+ライセンス: {source_license}
 
 ▼ 内容について
-・公的機関 (NASA / SpaceX / USGS / NOAA / 米軍 など) や CC BY ライセンス映像をベースに、独自の解説を加えた二次創作です
+・Pixabay / Pexels / NASA Image and Video Library / USGS / Internet Archive など
+  公式 API・パブリックドメイン・フリー素材ライセンスの映像をベースに、
+  独自の解説を加えた二次創作です
 ・元映像の音声はカットし、当チャンネル独自の解説と音声を被せています
 
 ▼ 制作
 ニュース解説: AI支援で制作
 音声合成: VOICEVOX (ずんだもん、青山龍星)
 
-#Shorts #衝撃映像 #ニュース #NASA #宇宙 #ニャンコンサル #ずんだもん
+#Shorts #衝撃映像 #ニュース #自然災害 #宇宙 #ニャンコンサル #ずんだもん
 """
 
 
@@ -105,8 +108,9 @@ def build_description(script: dict[str, Any]) -> str:
     return DESCRIPTION_TEMPLATE.format(
         title=script["title"],
         original_title=meta.get("original_title", ""),
-        video_url=meta.get("video_url", ""),
+        page_url=meta.get("page_url", ""),
         source_name=meta.get("source_name", ""),
+        source_license=meta.get("source_license", "(ソース定義参照)"),
     )
 
 
@@ -204,7 +208,8 @@ def main() -> int:
         "title": script["title"],
         "source_video_id": source_video_id,
         "source_name": meta.get("source_name"),
-        "source_url": meta.get("video_url"),
+        "source_page_url": meta.get("page_url"),
+        "source_license": meta.get("source_license"),
     }
     append_log(UPLOAD_LOG_PATH, upload_record)
     print(f"[upload] log 追記: {UPLOAD_LOG_PATH}")

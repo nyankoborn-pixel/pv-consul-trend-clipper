@@ -1,7 +1,8 @@
 """Gemini で台本・タイトル・クリップ秒数を生成する。
 
 work/selected.json (select_video.py 出力) を入力に:
-- yt-dlp で対象動画のメタデータ (タイトル / 説明 / 長さ) を取得
+- selected.json のメタ (タイトル / 説明 / duration / authority_intro) をそのまま利用
+  (旧版の yt-dlp 呼び出しは廃止)
 - 5 種類の構成パターン × 5 種類のずんだもん役割からランダム選択
 - Gemini API で:
     - 動画タイトル (55 字以内)
@@ -17,7 +18,6 @@ import json
 import os
 import random
 import re
-import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -31,34 +31,6 @@ SCRIPT_PATH = WORK_DIR / "script.json"
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
-
-# yt-dlp の YouTube bot 検知を回避するためのオプション。
-# GitHub Actions の IP 帯では default client がしばしばブロックされるため、
-# player_client を tv / web_safari / mweb の順に試す。
-YT_DLP_BYPASS_ARGS = [
-    "--no-playlist",
-    "--no-warnings",
-    "--extractor-args", "youtube:player_client=tv,web_safari,mweb,android",
-    "--user-agent",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
-]
-
-
-def yt_dlp_extra_args() -> list[str]:
-    """環境変数 YOUTUBE_COOKIES が設定されていれば --cookies を追加する。
-
-    YOUTUBE_COOKIES には Netscape 形式の cookies.txt 全文を入れる想定。
-    """
-    args: list[str] = []
-    cookies = os.environ.get("YOUTUBE_COOKIES", "").strip()
-    if cookies:
-        WORK_DIR.mkdir(parents=True, exist_ok=True)
-        cookies_file = WORK_DIR / "cookies.txt"
-        cookies_file.write_text(cookies, encoding="utf-8")
-        args.extend(["--cookies", str(cookies_file)])
-        print("[script] YOUTUBE_COOKIES を検出 → --cookies を有効化")
-    return args
 
 # 構成パターン (5 種類からランダム選択)
 COMPOSITION_PATTERNS = [
@@ -118,55 +90,21 @@ def load_selected() -> dict[str, Any]:
         return json.load(f)
 
 
-def fetch_video_metadata(video_url: str) -> dict[str, Any]:
-    """yt-dlp で対象動画のメタデータを取得する。
+def metadata_from_selected(selected: dict[str, Any]) -> dict[str, Any]:
+    """selected.json の中身からそのまま Gemini プロンプト用メタを構築する。
 
-    GitHub Actions の IP 帯は YouTube に bot として検知されやすいので、
-    player_client=tv,web_safari,mweb,android の順に試行する。
-    YOUTUBE_COOKIES env が設定されている場合はさらに cookies を併用する。
-
-    Args:
-        video_url: 対象動画 URL
-
-    Returns:
-        title / description / duration を含む辞書
+    yt-dlp 呼び出しは不要になった (各ソースの API がメタを返してくるため)。
     """
-    print(f"[script] yt-dlp でメタデータ取得: {video_url}")
-    cmd = [
-        "yt-dlp", "--dump-json", "--skip-download",
-        *YT_DLP_BYPASS_ARGS,
-        *yt_dlp_extra_args(),
-        video_url,
-    ]
-    try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=90,
-            check=True,
-            encoding="utf-8",
-        )
-    except subprocess.CalledProcessError as exc:
-        print(f"[script] FATAL: yt-dlp 失敗: {exc.stderr[-2000:]}")
-        if "Sign in to confirm" in (exc.stderr or "") or "not a bot" in (exc.stderr or ""):
-            print(
-                "[script] HINT: YouTube が bot 検知。Secrets に YOUTUBE_COOKIES を設定 "
-                "(Netscape 形式 cookies.txt の全文) してください。"
-            )
-        raise
-    except subprocess.TimeoutExpired:
-        print("[script] FATAL: yt-dlp タイムアウト")
-        raise
-
-    info = json.loads(result.stdout)
     meta = {
-        "title": info.get("title", ""),
-        "description": info.get("description", "")[:1500],
-        "duration": int(info.get("duration", 0)),
-        "uploader": info.get("uploader", ""),
+        "title": selected.get("title", "") or "",
+        "description": (selected.get("description") or "")[:1500],
+        "duration": int(selected.get("duration") or 0),
+        "uploader": selected.get("uploader", "") or "",
     }
-    print(f"[script] メタデータ取得: title='{meta['title']}' duration={meta['duration']}s")
+    print(
+        f"[script] メタデータ: title='{meta['title']}' duration={meta['duration']}s "
+        f"uploader='{meta['uploader']}'"
+    )
     return meta
 
 
@@ -177,6 +115,25 @@ def build_prompt(
     zundamon_role: str,
 ) -> str:
     """Gemini に投げるプロンプトを構築する。"""
+    duration = int(meta.get("duration") or 0)
+    if duration > 0:
+        clip_rule = (
+            f"6. クリップ抽出は元動画の **10〜20 秒の連続区間** を1つだけ指定 "
+            f"(start_sec, end_sec)\n"
+            f"   - end_sec は元動画の duration ({duration} s) を超えてはならない\n"
+            f"   - 序盤〜中盤の視覚的にインパクトある区間を選ぶ"
+        )
+    else:
+        # NASA / USGS / IA など duration 不明ソース。
+        # make_video.py 側で実 duration を取得して安全側に丸める。
+        clip_rule = (
+            "6. 元動画長さが不明なため、クリップは start_sec=0, end_sec=12 (12秒) で固定すること"
+        )
+
+    authority_intro = (selected.get("authority_intro") or "").strip()
+    if not authority_intro:
+        authority_intro = f"{selected.get('source_name', 'ソース')}が公開した映像"
+
     return f"""あなたは YouTube Shorts の台本作家です。
 以下の元動画について、執事猫キャラ「ニャンコンサル」と「ずんだもん」の掛け合いで
 解説する縦動画 Shorts (45-60 秒) の台本を JSON 形式で出力してください。
@@ -184,10 +141,11 @@ def build_prompt(
 # 元動画情報
 - 元タイトル: {meta['title']}
 - 元投稿者: {meta['uploader']}
-- 元動画長さ: {meta['duration']} 秒
-- ソース名: {selected.get('source_name')} (公的機関 or CC BY)
+- 元動画長さ: {duration if duration > 0 else "不明"} 秒
+- ソース名: {selected.get('source_name')}
+- ソース紹介句のヒント: 「{authority_intro}」 (これを冒頭で必ず言及する)
 - ライセンス: {selected.get('license')}
-- 元動画 URL: {selected.get('url')}
+- 元動画ページ URL: {selected.get('page_url')}
 - 元動画概要 (一部抜粋):
 {meta['description'][:800]}
 
@@ -202,13 +160,12 @@ def build_prompt(
 # 厳守ルール
 1. シーン数: 7〜9 シーン
 2. 各シーンのセリフは **40 字以内** (字幕として読みやすくするため)
-3. **冒頭 1〜2 シーン目で必ずソース権威紹介を入れる**
-   例: 「米国航空宇宙局NASAが公開した映像です」「米国地質調査所USGSの公式映像です」
+3. **冒頭 1〜2 シーン目で必ずソース紹介を入れる**
+   ヒント文「{authority_intro}」を自然な日本語に組み込んで読み上げる。
+   例: 「{authority_intro}を解説します」「これは{authority_intro}です」
 4. 出典 (ソース名) を本文中で必ず一度は言及する
 5. 動画タイトルは **55 字以内** で視聴者が惹かれるキャッチーな日本語
-6. クリップ抽出は元動画の **10〜20 秒の連続区間** を1つだけ指定 (start_sec, end_sec)
-   - end_sec は元動画の duration ({meta['duration']} s) を超えてはならない
-   - 0 秒〜 序盤の視覚的にインパクトある区間を選ぶ
+{clip_rule}
 7. 立ち絵表情は normal / happy / surprised / thinking から選ぶ
 8. 話者は "nyanko" または "zundamon" のみ
 
@@ -216,7 +173,7 @@ def build_prompt(
 ```json
 {{
   "title": "動画タイトル (55字以内)",
-  "clip": {{"start_sec": 0, "end_sec": 15}},
+  "clip": {{"start_sec": 0, "end_sec": 12}},
   "scenes": [
     {{
       "speaker": "nyanko",
@@ -335,11 +292,7 @@ def main() -> int:
         print(f"[script] FATAL: selected 読み込み失敗: {exc}")
         return 1
 
-    try:
-        meta = fetch_video_metadata(selected["url"])
-    except Exception as exc:
-        print(f"[script] FATAL: メタデータ取得失敗: {exc}")
-        return 2
+    meta = metadata_from_selected(selected)
 
     composition = random.choice(COMPOSITION_PATTERNS)
     zundamon_role = random.choice(ZUNDAMON_ROLES)
@@ -361,12 +314,15 @@ def main() -> int:
         print(f"[script] FATAL: 台本バリデーション失敗: {exc}")
         return 4
 
-    # メタ情報を script に同梱
+    # メタ情報を script に同梱 (make_video / upload_youtube が参照する)
     script["_meta"] = {
         "video_id": selected.get("video_id"),
-        "video_url": selected.get("url"),
+        "page_url": selected.get("page_url"),
+        "media_url": selected.get("media_url"),
         "source_name": selected.get("source_name"),
+        "source_type": selected.get("source_type"),
         "source_license": selected.get("license"),
+        "authority_intro": selected.get("authority_intro"),
         "original_title": meta["title"],
         "original_uploader": meta["uploader"],
         "original_duration": meta["duration"],

@@ -1,8 +1,9 @@
 """動画を合成する。
 
 work/script.json (generate_script.py 出力) を入力に:
-1. yt-dlp で元動画をダウンロード
+1. media_url (各 API の MP4 直リンク) を requests ストリームでダウンロード
 2. clip 区間 (start_sec, end_sec) を 1080x960 / 元音声カットで切り出し
+   実動画長より end_sec が大きければ自動で丸める
 3. シーンごとに VOICEVOX で音声合成
 4. シーンごとの下半分 (立ち絵 + 字幕) 動画を生成
 5. 全シーンを concat → 1080x960 の下半分動画を作成
@@ -37,28 +38,11 @@ VOICEVOX_URL = os.environ.get("VOICEVOX_URL", "http://localhost:50021")
 BGM_PATH = ASSETS_DIR / "bgm.mp3"
 BGM_VOLUME_DB = -12.0
 
-# yt-dlp の YouTube bot 検知を回避するためのオプション (詳細は generate_script.py 参照)
-YT_DLP_BYPASS_ARGS = [
-    "--no-playlist",
-    "--no-warnings",
-    "--extractor-args", "youtube:player_client=tv,web_safari,mweb,android",
-    "--user-agent",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
-]
-
-
-def yt_dlp_extra_args(work_dir: Path) -> list[str]:
-    """YOUTUBE_COOKIES env があれば --cookies を追加する。"""
-    args: list[str] = []
-    cookies = os.environ.get("YOUTUBE_COOKIES", "").strip()
-    if cookies:
-        work_dir.mkdir(parents=True, exist_ok=True)
-        cookies_file = work_dir / "cookies.txt"
-        cookies_file.write_text(cookies, encoding="utf-8")
-        args.extend(["--cookies", str(cookies_file)])
-        print("[make] YOUTUBE_COOKIES を検出 → --cookies を有効化")
-    return args
+DOWNLOAD_HEADERS = {
+    "User-Agent": "pv-consul-trend-clipper/1.0 (+https://github.com/)",
+}
+DOWNLOAD_TIMEOUT = 120
+DOWNLOAD_CHUNK = 1024 * 1024  # 1 MiB
 
 # 出力動画スペック
 W = 1080
@@ -150,48 +134,66 @@ def ffprobe_duration(path: Path) -> float:
 
 
 def download_video(url: str, dest: Path) -> Path:
-    """yt-dlp で元動画をダウンロードする。
+    """media_url (公式 API の MP4 直リンク) を requests ストリームで保存する。
 
-    GitHub Actions の IP は YouTube に bot として検知されやすいので、
-    player_client=tv,web_safari,mweb,android の順で試行する。
-    YOUTUBE_COOKIES env があれば cookies も併用する。
-
-    Returns:
-        ダウンロード済みファイルのパス
+    Pixabay / Pexels / NASA / Internet Archive / USGS のいずれも
+    cookies なし & 認証なしの直リンクを返すので yt-dlp は不要。
     """
-    print(f"[make] yt-dlp ダウンロード: {url}")
-    out_template = str(dest)
-    cmd = [
-        "yt-dlp",
-        "-f", "bv*+ba/b",
-        "--merge-output-format", "mp4",
-        "-o", out_template,
-        *YT_DLP_BYPASS_ARGS,
-        *yt_dlp_extra_args(WORK_DIR),
-        url,
-    ]
+    print(f"[make] HTTP ダウンロード: {url}")
+    dest.parent.mkdir(parents=True, exist_ok=True)
     try:
-        run(cmd, desc=f"download → {dest}")
-    except RuntimeError:
-        print(
-            "[make] HINT: bot 検知の場合は Secrets に YOUTUBE_COOKIES を設定してください "
-            "(Netscape 形式 cookies.txt の全文)"
-        )
-        raise
-    if not dest.exists():
-        # yt-dlp が拡張子を変えることがあるので work_dir を探索
-        for cand in WORK_DIR.glob("source.*"):
-            if cand.is_file():
-                cand.rename(dest)
-                break
-    if not dest.exists():
-        raise RuntimeError(f"ダウンロード結果が見つからない: {dest}")
+        with requests.get(
+            url,
+            stream=True,
+            headers=DOWNLOAD_HEADERS,
+            timeout=DOWNLOAD_TIMEOUT,
+            allow_redirects=True,
+        ) as r:
+            r.raise_for_status()
+            total = 0
+            with dest.open("wb") as f:
+                for chunk in r.iter_content(chunk_size=DOWNLOAD_CHUNK):
+                    if not chunk:
+                        continue
+                    f.write(chunk)
+                    total += len(chunk)
+    except requests.RequestException as exc:
+        raise RuntimeError(f"ダウンロード失敗: {exc}") from exc
+
+    if not dest.exists() or dest.stat().st_size == 0:
+        raise RuntimeError(f"ダウンロード結果が空: {dest}")
+    print(f"[make] download → {dest} ({dest.stat().st_size:,} bytes)")
     return dest
 
 
 def cut_clip(src: Path, start_sec: float, end_sec: float, dest: Path) -> Path:
-    """元動画から指定区間を 1080x960 / 元音声カットで切り出す。"""
+    """元動画から指定区間を 1080x960 / 元音声カットで切り出す。
+
+    実動画長を ffprobe で取得し、end_sec が動画長を超えていれば丸める。
+    結果クリップが極端に短い場合 (< 3 s) はエラーにする。
+    """
+    try:
+        actual_duration = ffprobe_duration(src)
+    except Exception as exc:
+        print(f"[make] WARNING: 元動画の duration 取得失敗 ({exc})。指定値で続行。")
+        actual_duration = float("inf")
+
+    if end_sec > actual_duration:
+        print(
+            f"[make] clip end_sec={end_sec}s > 実動画 {actual_duration:.2f}s。"
+            f"末尾 0.2s 余裕を見て丸める。"
+        )
+        end_sec = max(start_sec + 1.0, actual_duration - 0.2)
+    if start_sec >= end_sec:
+        raise RuntimeError(
+            f"clip 範囲が不正: start={start_sec}s end={end_sec}s "
+            f"(actual_duration={actual_duration})"
+        )
+
     duration = end_sec - start_sec
+    if duration < 3.0:
+        raise RuntimeError(f"clip 長さ {duration:.2f}s が短すぎる (元動画が短い可能性)")
+
     print(f"[make] clip 切り出し: {start_sec}s - {end_sec}s ({duration}s)")
     # 上半分の解像度に揃える: 1080x960、アスペクト比保持で fit + pad
     vf = (
@@ -461,12 +463,15 @@ def main() -> int:
         return 1
 
     meta = script["_meta"]
-    video_url = meta["video_url"]
+    media_url = meta.get("media_url") or ""
+    if not media_url:
+        print("[make] FATAL: _meta.media_url が空。fetch_videos.py の出力を確認。")
+        return 2
 
-    # 1. 元動画ダウンロード
+    # 1. 元動画ダウンロード (公式 API の MP4 直リンクから requests で取得)
     source_path = WORK_DIR / "source.mp4"
     try:
-        download_video(video_url, source_path)
+        download_video(media_url, source_path)
     except Exception as exc:
         print(f"[make] FATAL: ダウンロード失敗: {exc}")
         return 2
