@@ -119,7 +119,7 @@ def build_prompt(
     duration = int(meta.get("duration") or 0)
     if duration > 0:
         clip_rule = (
-            f"6. クリップ抽出は元動画の **10〜20 秒の連続区間** を1つだけ指定 "
+            f"8. クリップ抽出は元動画の **15〜25 秒の連続区間** を1つだけ指定 "
             f"(start_sec, end_sec)\n"
             f"   - end_sec は元動画の duration ({duration} s) を超えてはならない\n"
             f"   - 序盤〜中盤の視覚的にインパクトある区間を選ぶ"
@@ -128,7 +128,7 @@ def build_prompt(
         # NASA / USGS / IA など duration 不明ソース。
         # make_video.py 側で実 duration を取得して安全側に丸める。
         clip_rule = (
-            "6. 元動画長さが不明なため、クリップは start_sec=0, end_sec=12 (12秒) で固定すること"
+            "8. 元動画長さが不明なため、クリップは start_sec=0, end_sec=20 (20秒) で固定すること"
         )
 
     authority_intro = (selected.get("authority_intro") or "").strip()
@@ -159,26 +159,30 @@ def build_prompt(
 - 構成指示: {composition['instruction']}
 
 # 厳守ルール
-1. シーン数: 7〜9 シーン
-2. 各シーンのセリフは **40 字以内** (字幕として読みやすくするため)
-3. **冒頭 1〜2 シーン目で必ずソース紹介を入れる**
+1. **動画の総尺は 45〜60 秒**になるよう各シーンの長さを調整する
+   (VOICEVOX で読み上げた合計が 45〜60 秒になる文字数。日本語 約 6 字/秒 が目安)
+2. シーン数: **7〜9 シーン**
+3. 各シーンのセリフは **20〜40 字を目安、最長 60 字まで**
+   (短すぎると視聴体験が物足りない、長すぎると字幕が画面に収まらない)
+4. **冒頭 1〜2 シーン目で必ずソース紹介を入れる**
    ヒント文「{authority_intro}」を自然な日本語に組み込んで読み上げる。
    例: 「{authority_intro}を解説します」「これは{authority_intro}です」
-4. 出典 (ソース名) を本文中で必ず一度は言及する
-5. 動画タイトルは **55 字以内** で視聴者が惹かれるキャッチーな日本語
+5. **末尾 1 シーンで自然な締めを入れる**(問いかけ or 余韻、強い CTA は不要)
+6. 出典 (ソース名) を本文中で必ず一度は言及する
+7. 動画タイトルは **55 字以内** で視聴者が惹かれるキャッチーな日本語
 {clip_rule}
-7. 立ち絵表情は normal / happy / surprised / thinking から選ぶ
-8. 話者は "nyanko" または "zundamon" のみ
+9. 立ち絵表情は normal / happy / surprised / thinking から選ぶ
+10. 話者は "nyanko" または "zundamon" のみ
 
 # 出力形式 (JSON のみ。前後に説明文を付けない)
 ```json
 {{
   "title": "動画タイトル (55字以内)",
-  "clip": {{"start_sec": 0, "end_sec": 12}},
+  "clip": {{"start_sec": 0, "end_sec": 20}},
   "scenes": [
     {{
       "speaker": "nyanko",
-      "text": "セリフ (40字以内)",
+      "text": "セリフ (20〜40字目安、最長60字)",
       "emotion": "normal"
     }}
   ]
@@ -314,10 +318,15 @@ def validate_script(script: dict[str, Any], video_duration: int) -> None:
             sc["emotion"] = "normal"
         if not sc.get("text"):
             raise ValueError(f"scene[{i}] text が空")
+        if len(sc["text"]) < 15:
+            print(
+                f"[script] WARNING: scene[{i}] text {len(sc['text'])} 字。"
+                "短すぎて総尺が不足する可能性 (Gemini が 20-40 字目安に従っていない)"
+            )
         if len(sc["text"]) > 50:
             print(
                 f"[script] WARNING: scene[{i}] text {len(sc['text'])} 字。"
-                "字幕読みづらいが続行"
+                "字幕読みづらいが続行 (60 字超は要注意)"
             )
 
 

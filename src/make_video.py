@@ -52,19 +52,22 @@ FPS = 30
 
 # レイアウト定数
 # - 立ち絵: scale=CHAR_W:-1 (アスペクト比維持)、画面端から CHAR_MARGIN_X
-#           底辺 y=CHAR_BOTTOM_Y (字幕帯の上端 1500 - 余白 10)
-# - 字幕帯: y=SUBTITLE_BAND_Y..H、半透明黒 (SUBTITLE_BAND_ALPHA)
-# - 字幕文字: 帯の縦中央、白文字 + 黒縁
+#           底辺 y=CHAR_BOTTOM_Y (字幕帯の上端 1430 - 余白 10)
+# - 字幕帯: y=SUBTITLE_BAND_Y..(SUBTITLE_BAND_Y+SUBTITLE_BAND_H)、半透明黒
+# - 字幕文字: 帯の上端 + TOP_PAD から配置 (top-anchored)、長文時は
+#             下端から BOTTOM_SAFE 余白を確保するようクランプ。白文字 + 黒縁。
 CHAR_W = 400
 CHAR_MARGIN_X = 40
-CHAR_BOTTOM_Y = 1490  # 立ち絵の底辺の y 座標 (字幕帯上端より 10px 上)
-SUBTITLE_BAND_Y = 1500
+CHAR_BOTTOM_Y = 1420  # 立ち絵の底辺の y 座標 (字幕帯上端 1430 より 10px 上)
+SUBTITLE_BAND_Y = 1430
 SUBTITLE_BAND_H = 420
 SUBTITLE_BAND_ALPHA = 0.6
 SUBTITLE_FONTSIZE = 56
 SUBTITLE_WRAP_CHARS = 18  # 1 行あたり最大文字数 (fontsize 56 で 1080px に収まる)
 SUBTITLE_LINE_SPACING = 14
 SUBTITLE_BORDERW = 4
+SUBTITLE_TOP_PAD = 40       # 字幕帯の上端から文字までの余白
+SUBTITLE_BOTTOM_SAFE = 70   # フレーム下端から確保する安全マージン
 
 # キャラ → VOICEVOX speaker_id
 SPEAKER_IDS = {
@@ -143,6 +146,22 @@ def ffprobe_duration(path: Path) -> float:
     return float(res.stdout.strip())
 
 
+def ffprobe_dim(path: Path) -> str:
+    """メディアファイルの解像度を 'WIDTHxHEIGHT' で返す。失敗時は '?x?'。"""
+    try:
+        res = subprocess.run(
+            [
+                "ffprobe", "-v", "error", "-select_streams", "v:0",
+                "-show_entries", "stream=width,height",
+                "-of", "csv=s=x:p=0", str(path),
+            ],
+            capture_output=True, text=True, check=True, encoding="utf-8",
+        )
+        return res.stdout.strip() or "?x?"
+    except Exception:
+        return "?x?"
+
+
 def download_video(url: str, dest: Path) -> Path:
     """media_url を requests ストリームで保存する。"""
     print(f"[make] HTTP ダウンロード: {url}")
@@ -168,7 +187,10 @@ def download_video(url: str, dest: Path) -> Path:
 
     if not dest.exists() or dest.stat().st_size == 0:
         raise RuntimeError(f"ダウンロード結果が空: {dest}")
-    print(f"[make] download → {dest} ({dest.stat().st_size:,} bytes)")
+    print(
+        f"[make] download → {dest} "
+        f"({dest.stat().st_size:,} bytes, dim={ffprobe_dim(dest)})"
+    )
     return dest
 
 
@@ -224,10 +246,10 @@ def cut_clip(src: Path, start_sec: float, end_sec: float, dest: Path) -> Path:
         raise RuntimeError(f"clip 長さ {duration:.2f}s が短すぎる (元動画が短い可能性)")
 
     print(f"[make] clip 切り出し: {start_sec}s - {end_sec}s ({duration}s)")
-    # 縦動画 1080x1920 にカバー (中央クロップ) でスケール
+    # 縦動画 1080x1920 に letterbox で fit (横長ソースは上下黒帯、絵を変形させない)
     vf = (
-        f"scale={W}:{H}:force_original_aspect_ratio=increase,"
-        f"crop={W}:{H},"
+        f"scale={W}:{H}:force_original_aspect_ratio=decrease,"
+        f"pad={W}:{H}:(ow-iw)/2:(oh-ih)/2:color=black,"
         f"setsar=1,fps={FPS}"
     )
     run(
@@ -244,6 +266,7 @@ def cut_clip(src: Path, start_sec: float, end_sec: float, dest: Path) -> Path:
         ],
         desc=f"clip → {dest}",
     )
+    print(f"[make] clip 完了: {dest} dim={ffprobe_dim(dest)}")
     return dest
 
 
@@ -399,8 +422,13 @@ def compose_scene(
 
     fontfile_arg = font_path.replace("\\", "/").replace(":", "\\:")
 
-    # 字幕帯の縦中央に文字を置く: y = band_y + (band_h - text_h)/2
-    subtitle_y_expr = f"{SUBTITLE_BAND_Y}+({SUBTITLE_BAND_H}-text_h)/2"
+    # 字幕の y 位置: 基本は帯上端 + TOP_PAD (top-anchored)。
+    # 長文で text_h が大きい場合に下端からはみ出さないよう、
+    # フレーム下端 - BOTTOM_SAFE - text_h を上限としてクランプ。
+    subtitle_y_expr = (
+        f"min({H}-{SUBTITLE_BOTTOM_SAFE}-text_h,"
+        f"{SUBTITLE_BAND_Y}+{SUBTITLE_TOP_PAD})"
+    )
 
     filter_complex = (
         # ベース動画 (1080x1920) を yuv420p に正規化
