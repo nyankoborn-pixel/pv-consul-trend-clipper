@@ -238,9 +238,13 @@ def cut_clip(src: Path, start_sec: float, end_sec: float, dest: Path) -> Path:
         raise RuntimeError(f"clip 長さ {duration:.2f}s が短すぎる (元動画が短い可能性)")
 
     print(f"[make] clip 切り出し: {start_sec}s - {end_sec}s ({duration}s)")
-    # 最小構成: 画面サイズに引き伸ばす (アスペクト比は変わるが見切れなし)
+    # cover-crop: 元アスペクト比を保持したまま 1080x1920 を中央クロップで充填。
+    # YouTube Shorts 推奨方式 (force_original_aspect_ratio=increase + crop)。
+    # 立ち絵を廃止したので被写体被覆は字幕帯の 13% のみ、cover-crop で
+    # 多少左右が切れても画面全体が映像で埋まり、被写体は中央に維持される。
     vf = (
-        f"scale={W}:{H},"
+        f"scale={W}:{H}:force_original_aspect_ratio=increase,"
+        f"crop={W}:{H},"
         f"setsar=1,fps={FPS}"
     )
     run(
@@ -343,15 +347,20 @@ def compose_scene(
     話者識別は VOICEVOX の声 (nyanko=青山龍星 / zundamon) で継続。
     """
     # text は main() 側で改行クリーン済み (VOICEVOX と drawtext で同一の文字列)。
-    # ここで wrap_jp_text() による機械的な折返しのみ適用する。
+    # ここで wrap_jp_text() による機械的な折返しを適用し、
+    # 結果をテキストファイルに書いて drawtext の textfile= 経由で渡す。
+    #
+    # 重要: drawtext text= 直書きでは "\n" が改行として解釈されず literal "n"
+    # 文字として描画されてしまう (filter parser を通り抜けた後の drawtext の
+    # escape ルールが \X → X(literal) 扱いのため)。
+    # textfile= 方式ならファイル内の実改行を素直に改行として描画する。
     wrapped = wrap_jp_text(text)
-    escaped_text = escape_drawtext_text(wrapped)
-    # デバッグ用: シーンごとのテキストを残す
     text_file = text_dir / f"scene_{scene_index:02d}_text.txt"
     text_file.write_text(wrapped, encoding="utf-8")
     print(f"[make] scene[{scene_index}] speaker={speaker} text={wrapped!r}")
 
     fontfile_arg = font_path.replace("\\", "/").replace(":", "\\:")
+    textfile_arg = str(text_file.resolve()).replace("\\", "/").replace(":", "\\:")
 
     # 字幕の y 位置: 基本は帯上端 + TOP_PAD (top-anchored)。
     # 長文で text_h が大きい場合に下端からはみ出さないよう、
@@ -376,10 +385,10 @@ def compose_scene(
         # 字幕帯 (半透明黒): y=SUBTITLE_BAND_Y から H まで
         f"[v0]drawbox=x=0:y={SUBTITLE_BAND_Y}:w={W}:h={SUBTITLE_BAND_H}:"
         f"color=black@{SUBTITLE_BAND_ALPHA}:t=fill[withbox];"
-        # 字幕テキスト
+        # 字幕テキスト (textfile= 経由で多行改行を保持)
         f"[withbox]drawtext="
         f"fontfile='{fontfile_arg}':"
-        f"text={escaped_text}:"
+        f"textfile='{textfile_arg}':"
         f"fontcolor=white:"
         f"fontsize={SUBTITLE_FONTSIZE}:"
         f"line_spacing={SUBTITLE_LINE_SPACING}:"
@@ -402,7 +411,7 @@ def compose_scene(
             "-t", str(duration),
             "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
             "-pix_fmt", "yuv420p",
-            "-c:a", "aac", "-b:a", "192k",
+            "-c:a", "aac", "-b:a", "192k", "-ar", "48000",  # YouTube Shorts 推奨
             "-r", str(FPS),
             str(dest),
         ],
@@ -456,7 +465,7 @@ def mix_bgm(input_video: Path, dest: Path, total_duration: float) -> Path:
             "-t", str(total_duration),
             # video は再エンコード不要 (concat 済みの presentation.mp4 をそのまま)
             "-c:v", "copy",
-            "-c:a", "aac", "-b:a", "192k",
+            "-c:a", "aac", "-b:a", "192k", "-ar", "48000",  # YouTube Shorts 推奨
             str(dest),
         ],
         desc=f"BGM mix → {dest}",
