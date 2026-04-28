@@ -38,6 +38,7 @@ jobs:
       YOUTUBE_CLIENT_ID: ${{ secrets.YOUTUBE_CLIENT_ID }}
       YOUTUBE_CLIENT_SECRET: ${{ secrets.YOUTUBE_CLIENT_SECRET }}
       YOUTUBE_REFRESH_TOKEN: ${{ secrets.YOUTUBE_REFRESH_TOKEN }}
+      YOUTUBE_COOKIES: ${{ secrets.YOUTUBE_COOKIES }}
       VOICEVOX_URL: http://localhost:50021
       PYTHONUNBUFFERED: "1"
 

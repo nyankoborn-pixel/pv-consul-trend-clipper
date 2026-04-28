@@ -37,6 +37,29 @@ VOICEVOX_URL = os.environ.get("VOICEVOX_URL", "http://localhost:50021")
 BGM_PATH = ASSETS_DIR / "bgm.mp3"
 BGM_VOLUME_DB = -12.0
 
+# yt-dlp の YouTube bot 検知を回避するためのオプション (詳細は generate_script.py 参照)
+YT_DLP_BYPASS_ARGS = [
+    "--no-playlist",
+    "--no-warnings",
+    "--extractor-args", "youtube:player_client=tv,web_safari,mweb,android",
+    "--user-agent",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+]
+
+
+def yt_dlp_extra_args(work_dir: Path) -> list[str]:
+    """YOUTUBE_COOKIES env があれば --cookies を追加する。"""
+    args: list[str] = []
+    cookies = os.environ.get("YOUTUBE_COOKIES", "").strip()
+    if cookies:
+        work_dir.mkdir(parents=True, exist_ok=True)
+        cookies_file = work_dir / "cookies.txt"
+        cookies_file.write_text(cookies, encoding="utf-8")
+        args.extend(["--cookies", str(cookies_file)])
+        print("[make] YOUTUBE_COOKIES を検出 → --cookies を有効化")
+    return args
+
 # 出力動画スペック
 W = 1080
 H = 1920
@@ -129,21 +152,32 @@ def ffprobe_duration(path: Path) -> float:
 def download_video(url: str, dest: Path) -> Path:
     """yt-dlp で元動画をダウンロードする。
 
+    GitHub Actions の IP は YouTube に bot として検知されやすいので、
+    player_client=tv,web_safari,mweb,android の順で試行する。
+    YOUTUBE_COOKIES env があれば cookies も併用する。
+
     Returns:
         ダウンロード済みファイルのパス
     """
     print(f"[make] yt-dlp ダウンロード: {url}")
     out_template = str(dest)
-    run(
-        [
-            "yt-dlp", "-f", "bv*+ba/b",
-            "--merge-output-format", "mp4",
-            "-o", out_template,
-            "--no-playlist", "--no-warnings",
-            url,
-        ],
-        desc=f"download → {dest}",
-    )
+    cmd = [
+        "yt-dlp",
+        "-f", "bv*+ba/b",
+        "--merge-output-format", "mp4",
+        "-o", out_template,
+        *YT_DLP_BYPASS_ARGS,
+        *yt_dlp_extra_args(WORK_DIR),
+        url,
+    ]
+    try:
+        run(cmd, desc=f"download → {dest}")
+    except RuntimeError:
+        print(
+            "[make] HINT: bot 検知の場合は Secrets に YOUTUBE_COOKIES を設定してください "
+            "(Netscape 形式 cookies.txt の全文)"
+        )
+        raise
     if not dest.exists():
         # yt-dlp が拡張子を変えることがあるので work_dir を探索
         for cand in WORK_DIR.glob("source.*"):
