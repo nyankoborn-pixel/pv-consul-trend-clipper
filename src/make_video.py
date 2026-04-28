@@ -67,6 +67,11 @@ SUBTITLE_BORDERW = 4
 SUBTITLE_TOP_PAD = 40       # 字幕帯の上端から文字までの余白
 SUBTITLE_BOTTOM_SAFE = 70   # フレーム下端から確保する安全マージン
 
+# 中央前景 (元動画) の最大寸法 — bgblur 背景の上に重ねる「サムネイル風」枠サイズ
+# 1080x1920 フレームに対し W=900 (83%) で左右に余白、H=1500 で字幕帯 (y=1430..) と被らない
+FG_MAX_W = 900
+FG_MAX_H = 1500
+
 # キャラ → VOICEVOX speaker_id (音声の声分けは継続)
 SPEAKER_IDS = {
     "zundamon": 3,
@@ -240,14 +245,15 @@ def cut_clip(src: Path, start_sec: float, end_sec: float, dest: Path) -> Path:
     print(f"[make] clip 切り出し: {start_sec}s - {end_sec}s ({duration}s)")
     # 背景ぼかし + 中央配置 (TikTok/Shorts 定番、GPT 推奨):
     # - bg: 元動画を 1080x1920 にカバー (cover-crop) してガウシアンぼかし
-    # - fg: 元動画を縦横比保持で 1080x1920 に decrease で fit
+    # - fg: 元動画を縦横比保持で FG_MAX_W x FG_MAX_H に decrease で fit
+    #       (1080 幅フルではなく FG_MAX_W=900 に明示縮小、bgblur が左右にも見える)
     # - overlay: bgblur に fgfit を中央重ね
     # 黒帯のまま放置するより一体感が出て、被写体は元アスペクト比のまま全体可視。
     filter_complex = (
         f"[0:v]split=2[bg][fg];"
         f"[bg]scale={W}:{H}:force_original_aspect_ratio=increase,"
         f"crop={W}:{H},gblur=sigma=20[bgblur];"
-        f"[fg]scale={W}:{H}:force_original_aspect_ratio=decrease[fgfit];"
+        f"[fg]scale={FG_MAX_W}:{FG_MAX_H}:force_original_aspect_ratio=decrease[fgfit];"
         f"[bgblur][fgfit]overlay=(W-w)/2:(H-h)/2,"
         f"setsar=1,fps={FPS}[out]"
     )
