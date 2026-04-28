@@ -27,7 +27,7 @@ jobs:
 
     services:
       voicevox:
-        image: voicevox/voicevox_engine:cpu-ubuntu20.04-latest
+        image: voicevox/voicevox_engine:cpu-latest
         ports:
           - 50021:50021
 
@@ -39,7 +39,6 @@ jobs:
       YOUTUBE_CLIENT_SECRET: ${{ secrets.YOUTUBE_CLIENT_SECRET }}
       YOUTUBE_REFRESH_TOKEN: ${{ secrets.YOUTUBE_REFRESH_TOKEN }}
       VOICEVOX_URL: http://localhost:50021
-      FONT_PATH: /usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc
       PYTHONUNBUFFERED: "1"
 
     steps:
@@ -72,10 +71,12 @@ jobs:
       - name: Wait for VOICEVOX engine
         run: |
           echo "Waiting for VOICEVOX engine on :50021 ..."
-          for i in $(seq 1 60); do
-            if curl -fsS http://localhost:50021/version > /dev/null 2>&1; then
-              echo "VOICEVOX engine is up."
-              curl -fsS http://localhost:50021/version
+          # /version は古いバージョンに無いことがあるため / (HTTP 200) を見る
+          for i in $(seq 1 90); do
+            code=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:50021/ || echo "000")
+            if [ "$code" = "200" ] || [ "$code" = "404" ]; then
+              echo "VOICEVOX engine is up (HTTP $code)."
+              curl -fsS http://localhost:50021/version || true
               echo
               exit 0
             fi
@@ -83,17 +84,6 @@ jobs:
           done
           echo "VOICEVOX engine did not become ready in time"
           exit 1
-
-      - name: Resolve font path
-        run: |
-          # 環境により .ttc / .otf の場所が異なるため fc-match で実体パスを取得
-          RESOLVED=$(fc-match -f "%{file}\n" "Noto Sans CJK JP:weight=bold" || true)
-          if [ -n "$RESOLVED" ] && [ -f "$RESOLVED" ]; then
-            echo "FONT_PATH=$RESOLVED" >> "$GITHUB_ENV"
-            echo "Resolved font: $RESOLVED"
-          else
-            echo "WARN: fc-match で日本語フォント解決失敗。FONT_PATH 既定値を使用。"
-          fi
 
       - name: Step 1 — fetch_videos
         run: python src/fetch_videos.py
