@@ -489,9 +489,14 @@ def mix_bgm(input_video: Path, dest: Path, total_duration: float) -> Path:
         shutil.copy(input_video, dest)
         return dest
 
+    # amix は全入力のサンプルレート一致が前提。
+    # 出力に -ar 48000 を指定しているが、amix 直前で両入力を明示的に 48kHz へ
+    # aresample しないと内部 rate 不一致で BGM が途切れ途切れになる。
+    # (presentation.mp4 audio = 48kHz、bgm.mp3 = 44.1kHz が典型)
     filter_complex = (
-        f"[1:a]volume={BGM_VOLUME_DB}dB[bgm];"
-        f"[0:a][bgm]amix=inputs=2:duration=first:dropout_transition=0[a]"
+        f"[0:a]aresample=48000[a0];"
+        f"[1:a]aresample=48000,volume={BGM_VOLUME_DB}dB[bgm];"
+        f"[a0][bgm]amix=inputs=2:duration=first:dropout_transition=0[a]"
     )
     run(
         [
