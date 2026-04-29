@@ -54,10 +54,12 @@ DOWNLOAD_HEADERS = {
 DOWNLOAD_TIMEOUT = 120
 DOWNLOAD_CHUNK = 1024 * 1024  # 1 MiB
 
-# 動きスコア却下: 切り出した clip.mp4 が動きが少なすぎる場合は当該回をスキップ
-# (video_selected.jsonl に既に entry 済なので次回 cron は別動画を選ぶ)
-# tblend=difference + signalstats の YAVG 平均を 0..255 範囲で計算する
+# 動きスコア却下: 切り出した clip.mp4 が動きが少なすぎる場合は別候補で再試行する。
+# tblend=difference + signalstats の YAVG 平均を 0..255 範囲で計算する。
+# MAX_RETRIES に達したら exit code 12 で諦め、cron 次回起動時に別動画を選ぶ
+# (video_selected.jsonl に却下分も含めて entry 済みになるので自動除外される)。
 MOTION_SCORE_THRESHOLD = float(os.environ.get("MOTION_SCORE_THRESHOLD", "1.0"))
+MOTION_SCORE_MAX_RETRIES = int(os.environ.get("MOTION_SCORE_MAX_RETRIES", "3"))
 
 # 出力動画スペック
 W = 1080
@@ -258,6 +260,30 @@ def append_rejected_log(record: dict[str, Any]) -> None:
     with REJECTED_LOG_PATH.open("a", encoding="utf-8") as f:
         f.write(json.dumps(record, ensure_ascii=False) + "\n")
     print(f"[make] 却下ログ追記: {REJECTED_LOG_PATH}")
+
+
+def re_select_and_regenerate() -> int:
+    """別候補を再選定して script.json を再生成する。
+
+    subprocess で select_video.py → generate_script.py を順番に呼ぶだけ。
+    select_video.py は video_selected.jsonl に既出 entry を持つ動画を自動除外し、
+    残った候補から sort 順 1 位を選定 + record_selection で新 entry を追加する。
+    generate_script.py は新 selected.json を読んで script.json を上書きする。
+
+    Returns:
+        0 で成功、それ以外は失敗 (候補枯渇 / Gemini エラー等)。
+    """
+    src_dir = ROOT / "src"
+    print("[make] 別候補で再選定 → 台本再生成 ...")
+    rc = subprocess.call([sys.executable, str(src_dir / "select_video.py")])
+    if rc != 0:
+        print(f"[make] select_video.py 失敗 rc={rc} (候補枯渇の可能性)")
+        return rc
+    rc = subprocess.call([sys.executable, str(src_dir / "generate_script.py")])
+    if rc != 0:
+        print(f"[make] generate_script.py 失敗 rc={rc}")
+        return rc
+    return 0
 
 
 @retry(
@@ -666,44 +692,63 @@ def main() -> int:
 
     # 立ち絵は廃止したのでアセット存在チェックは不要 (script.json の _meta は維持)。
 
-    meta = script["_meta"]
-    media_url = meta.get("media_url") or ""
-    if not media_url:
-        print("[make] FATAL: _meta.media_url が空。fetch_videos.py の出力を確認。")
-        return 2
-
-    # 1. 元動画ダウンロード
+    # 1〜2.5. 動きスコア却下 + 再選定リトライループ
+    # 各 attempt:
+    #   a. script.json から media_url を読む
+    #   b. download_video → source.mp4
+    #   c. cut_clip → clip.mp4
+    #   d. compute_motion_score
+    #   e. 閾値以上なら採用してループ脱出、未満なら却下ログ + 再選定
+    # MAX_RETRIES 回連続却下で exit code 12 で諦め、cron 次回が別動画を選ぶ
     source_path = WORK_DIR / "source.mp4"
-    try:
-        download_video(media_url, source_path)
-    except Exception as exc:
-        print(f"[make] FATAL: ダウンロード失敗: {exc}")
-        return 2
-
-    # 2. clip 切り出し (1080x1920 フルスクリーン)
-    clip = script["clip"]
     clip_path = WORK_DIR / "clip.mp4"
-    try:
-        cut_clip(source_path, float(clip["start_sec"]), float(clip["end_sec"]), clip_path)
-    except Exception as exc:
-        print(f"[make] FATAL: clip 切り出し失敗: {exc}")
-        return 3
+    accepted = False
 
-    # 2.5. 動きスコア却下 (cut_clip 直後、VOICEVOX 合成前に判定して時間節約)
-    # 閾値未満は当該回の処理を中止し、cron 次回起動時に video_selected.jsonl で
-    # 自動的に別動画が選ばれる仕組みに任せる (方針 B)。
-    motion_score = compute_motion_score(clip_path)
-    print(
-        f"[make] motion score: {motion_score:.3f} "
-        f"(threshold={MOTION_SCORE_THRESHOLD}, fail-open at inf)"
-    )
-    if motion_score < MOTION_SCORE_THRESHOLD:
+    for attempt in range(MOTION_SCORE_MAX_RETRIES):
+        meta = script["_meta"]
+        media_url = meta.get("media_url") or ""
+        if not media_url:
+            print("[make] FATAL: _meta.media_url が空。fetch_videos.py の出力を確認。")
+            return 2
+
+        attempt_label = f"attempt {attempt + 1}/{MOTION_SCORE_MAX_RETRIES}"
+        print(f"[make] === {attempt_label}: video_id={meta.get('video_id')} ===")
+
+        # a-b. ダウンロード
+        try:
+            download_video(media_url, source_path)
+        except Exception as exc:
+            print(f"[make] FATAL: ダウンロード失敗 ({attempt_label}): {exc}")
+            return 2
+
+        # c. clip 切り出し (1080x1920 フルスクリーン)
+        clip = script["clip"]
+        try:
+            cut_clip(source_path, float(clip["start_sec"]), float(clip["end_sec"]), clip_path)
+        except Exception as exc:
+            print(f"[make] FATAL: clip 切り出し失敗 ({attempt_label}): {exc}")
+            return 3
+
+        # d. 動きスコア計算
+        motion_score = compute_motion_score(clip_path)
+        print(
+            f"[make] motion score: {motion_score:.3f} "
+            f"(threshold={MOTION_SCORE_THRESHOLD}, fail-open at inf, {attempt_label})"
+        )
+
+        # e. 閾値判定
+        if motion_score >= MOTION_SCORE_THRESHOLD:
+            accepted = True
+            break
+
+        # 却下処理: ログ + (リトライ可能なら) 再選定 + ループ継続
         append_rejected_log({
             "rejected_at": datetime.now(timezone.utc).isoformat(),
             "video_id": meta.get("video_id"),
             "reason": "low_motion",
             "motion_score": motion_score,
             "threshold": MOTION_SCORE_THRESHOLD,
+            "attempt": attempt + 1,
             "page_url": meta.get("page_url"),
             "media_url": meta.get("media_url"),
             "source_name": meta.get("source_name"),
@@ -712,9 +757,35 @@ def main() -> int:
         })
         print(
             f"[make] 動きが少ない ({motion_score:.3f} < {MOTION_SCORE_THRESHOLD}) "
-            f"ため当該回スキップ。cron 次回が別動画を選ぶ。"
+            f"ため却下 ({attempt_label})"
         )
+
+        # 最終 attempt なら諦める
+        if attempt + 1 >= MOTION_SCORE_MAX_RETRIES:
+            print(
+                f"[make] {MOTION_SCORE_MAX_RETRIES} 回連続却下、当該 CI run 中止。"
+                "cron 次回が別動画を選ぶ。"
+            )
+            return 12
+
+        # 別候補で再選定 → 台本再生成
+        rc = re_select_and_regenerate()
+        if rc != 0:
+            print(f"[make] 再選定/再生成失敗 rc={rc}、当該 CI run 中止。")
+            return 12
+
+        # 新しい script.json を読み直してループ継続
+        try:
+            script = load_script()
+        except Exception as exc:
+            print(f"[make] FATAL: 再読込失敗: {exc}")
+            return 1
+
+    if not accepted:
+        # 理論上ここには来ない (上で return 12 済み) が念のため
         return 12
+
+    meta = script["_meta"]  # 採用された video の meta を以降で使用
 
     # 3. 全シーンの VOICEVOX 合成 (第1ループ)
     # 各シーンの音声 wav と継続時間を先に全部確定させ、合計 = 総尺を計算する。

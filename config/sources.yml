@@ -30,6 +30,9 @@ sources:
       - "earthquake collapse"
       - "wildfire flames"
       - "avalanche snow"
+      - "river rapids"
+      - "geyser eruption"
+      - "thunderstorm strike"
     weight: 8
     authority_intro: "Pixabayで公開されている自然現象の映像"
     license: "Pixabay License"
@@ -44,6 +47,9 @@ sources:
       - "lightning storm"
       - "ocean wave crash"
       - "volcano lava"
+      - "rapids whitewater"
+      - "strong wind"
+      - "waterfall powerful"
     weight: 8
     authority_intro: "Pexelsで公開されているフリー素材映像"
     license: "Pexels License"
