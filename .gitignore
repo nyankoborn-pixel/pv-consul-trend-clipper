@@ -13,8 +13,12 @@ env/
 .env.*
 !.env.example
 *.pem
+*.p12
 client_secret*.json
 token*.json
+credentials*.json
+service-account*.json
+service_account*.json
 
 # 生成物 (動画 / 音声 / 一時ファイル)
 output.mp4

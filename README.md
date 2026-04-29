@@ -142,15 +142,42 @@ pv-consul-trend-clipper/
 │   ├── make_video.py        # requests で MP4 DL → ffmpeg 合成
 │   └── upload_youtube.py    # YouTube Data API v3 で投稿
 ├── logs/                    # 投稿履歴 (jsonl)
+├── CREDITS.md               # サードパーティ素材・依存のクレジット
+├── LICENSE                  # MIT License (コードに適用、assets/ は別ライセンス)
 ├── .gitignore
 └── README.md
 ```
 
 ---
 
+## Credits
+
+本リポジトリは **MIT License**(コード本体)で配布されています。
+詳細なライセンス文は [`LICENSE`](LICENSE) を参照してください。
+
+`assets/` 配下のサードパーティ素材(キャラクター画像・BGM)、および利用している
+ライブラリ・API のクレジット情報は [`CREDITS.md`](CREDITS.md) に集約しています。
+
+主要な利用先:
+
+- **音声合成**: [VOICEVOX](https://voicevox.hiroshiba.jp/) © Hiroshiba Kazuyuki
+  (キャラクター: ずんだもん / 青山龍星)
+- **キャラクター画像**: ずんだもん([東北ずん子・ずんだもんプロジェクト](https://zunko.jp/con_ongen_kiyaku.html)) / ニャンコンサル(© nyankoborn-pixel)
+- **BGM**: 「3:03 PM」 by しゃろう氏(クレジット表記で許諾されているフリー音源)
+- **動画素材 API**: [Pixabay](https://pixabay.com/api/docs/) / [Pexels](https://www.pexels.com/api/) / [NASA Image and Video Library](https://images.nasa.gov/) / [USGS](https://www.usgs.gov/programs/VHP) / [Internet Archive](https://archive.org/)
+- **動画/音声処理**: [ffmpeg](https://ffmpeg.org/) / [Gemini API](https://ai.google.dev/)
+- **字幕フォント**: [Noto Sans CJK](https://github.com/notofonts/noto-cjk) (SIL OFL 1.1、ランナー上で apt 経由インストール)
+
+各動画素材の出典は **生成された YouTube Shorts の動画概要欄** にも自動的に明記されます。
+
+---
+
 ## ライセンス / 注意
 
-- 本リポジトリのコードは private 運用前提
-- 投稿動画の著作権は元映像の権利者に帰属。本プロジェクトは出典明記の上で
+- **コード**: MIT License([`LICENSE`](LICENSE) 参照)
+- **assets/ 配下の素材**: 個別ライセンスが適用([`CREDITS.md`](CREDITS.md) 参照)
+- **生成動画の著作権**: 元映像の権利者に帰属。本プロジェクトは出典明記の上で
   Pixabay License / Pexels License / Public Domain (NASA/USGS) /
   Internet Archive のライセンスに従う
+- **API キー / 認証情報**: リポジトリには含めず、GitHub Actions の Secrets として
+  管理。リポジトリを fork / clone しても秘匿情報は引き継がれない
