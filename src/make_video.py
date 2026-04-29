@@ -546,10 +546,19 @@ def mix_bgm(input_video: Path, dest: Path, total_duration: float) -> Path:
     #    voice 中は BGM が約 -10dB 追加で減衰、声の聞き取りやすさを向上
     #    attack=20ms / release=400ms でポンピング (BGM の急激な変動) を防ぐ
     # 4. voice_main と ducked BGM を amix
-    # aresample=48000 は両入力の rate 一致 (sidechain 必須要件 + 音切れ防止) も兼ねる。
+    #
+    # aformat=channel_layouts=stereo:
+    #   sidechaincompress は両入力の channel layout が確定していないと
+    #   "No channel layout for input 1" でエラーになる。
+    #   VOICEVOX 出力 (mono) を asplit すると片方の layout メタが落ちるケースが
+    #   あるため、aresample 直後に aformat で明示的に stereo に揃える。
+    #   mono → stereo は ffmpeg が自動で upmix する。
+    #   sample rate も両者 48kHz に揃え、amix / sidechain 必須要件を担保。
     filter_complex = (
-        f"[0:a]aresample=48000,asplit=2[voice_main][voice_sc];"
-        f"[1:a]aresample=48000,volume={BGM_VOLUME_DB}dB[bgm_pre];"
+        f"[0:a]aresample=48000,aformat=channel_layouts=stereo,"
+        f"asplit=2[voice_main][voice_sc];"
+        f"[1:a]aresample=48000,aformat=channel_layouts=stereo,"
+        f"volume={BGM_VOLUME_DB}dB[bgm_pre];"
         f"[bgm_pre][voice_sc]sidechaincompress="
         f"threshold=0.05:ratio=4:attack=20:release=400:makeup=1[bgm_ducked];"
         f"[voice_main][bgm_ducked]amix=inputs=2:duration=first:dropout_transition=0[a]"
