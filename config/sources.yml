@@ -49,11 +49,16 @@ sources:
   - name: "NASA Image and Video Library"
     type: "nasa"
     queries:
-      - "explosion"
-      - "launch"
-      - "earth"
-      - "storm"
-    weight: 9
+      - "spacewalk"
+      - "EVA extravehicular"
+      - "splashdown"
+      - "Crew Dragon"
+      - "Falcon Heavy"
+      - "DART asteroid"
+      - "aurora ISS"
+      - "Mars rover"
+      - "solar flare"
+    weight: 7
     authority_intro: "米国航空宇宙局NASAが公開した映像"
     license: "Public Domain (NASA media usage guidelines)"
 
