@@ -22,13 +22,14 @@ sources:
   - name: "Pixabay"
     type: "pixabay"
     queries:
-      - "natural disaster"
-      - "earthquake"
-      - "tornado"
-      - "hurricane"
-      - "tsunami"
-      - "volcano"
-      - "lightning"
+      - "tornado close up"
+      - "hurricane wind damage"
+      - "tsunami wave"
+      - "volcano eruption"
+      - "lightning strike"
+      - "earthquake collapse"
+      - "wildfire flames"
+      - "avalanche snow"
     weight: 8
     authority_intro: "Pixabayで公開されている自然現象の映像"
     license: "Pixabay License"
@@ -36,10 +37,13 @@ sources:
   - name: "Pexels"
     type: "pexels"
     queries:
-      - "disaster"
-      - "explosion"
-      - "storm"
-      - "shocking"
+      - "tornado"
+      - "explosion close up"
+      - "storm dramatic"
+      - "wildfire footage"
+      - "lightning storm"
+      - "ocean wave crash"
+      - "volcano lava"
     weight: 8
     authority_intro: "Pexelsで公開されているフリー素材映像"
     license: "Pexels License"
@@ -88,4 +92,8 @@ fetch:
   # HTTP タイムアウト (秒)
   request_timeout: 30
   # 最低動画長 (秒): これ未満は除外 (短すぎる素材は使えない)
-  min_duration: 5
+  # 15s 以上にすることで、20s クリップ切出し時に短すぎる素材を弾く
+  min_duration: 15
+  # 最低横幅 (px): 1080x1920 縦動画に耐える解像度を要求
+  # Pixabay は API 直接フィルタ、Pexels は size=medium + 取得後フィルタ
+  min_width: 1080

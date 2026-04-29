@@ -24,6 +24,7 @@ import os
 import shutil
 import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -38,8 +39,10 @@ from tenacity import (
 ROOT = Path(__file__).resolve().parent.parent
 WORK_DIR = ROOT / "work"
 ASSETS_DIR = ROOT / "assets"
+LOGS_DIR = ROOT / "logs"
 SCRIPT_PATH = WORK_DIR / "script.json"
 OUTPUT_PATH = ROOT / "output.mp4"
+REJECTED_LOG_PATH = LOGS_DIR / "video_rejected.jsonl"
 
 VOICEVOX_URL = os.environ.get("VOICEVOX_URL", "http://localhost:50021")
 BGM_PATH = ASSETS_DIR / "bgm.mp3"
@@ -50,6 +53,11 @@ DOWNLOAD_HEADERS = {
 }
 DOWNLOAD_TIMEOUT = 120
 DOWNLOAD_CHUNK = 1024 * 1024  # 1 MiB
+
+# 動きスコア却下: 切り出した clip.mp4 が動きが少なすぎる場合は当該回をスキップ
+# (video_selected.jsonl に既に entry 済なので次回 cron は別動画を選ぶ)
+# tblend=difference + signalstats の YAVG 平均を 0..255 範囲で計算する
+MOTION_SCORE_THRESHOLD = float(os.environ.get("MOTION_SCORE_THRESHOLD", "1.0"))
 
 # 出力動画スペック
 W = 1080
@@ -196,6 +204,60 @@ def ffprobe_dim(path: Path) -> str:
         return res.stdout.strip() or "?x?"
     except Exception:
         return "?x?"
+
+
+def compute_motion_score(clip_path: Path) -> float:
+    """clip.mp4 の動きスコア (隣接フレーム差の平均輝度) を返す。
+
+    手法: ffmpeg の `tblend=all_mode=difference` で隣接フレーム差分を生成、
+    `signalstats` で各フレームの差分輝度平均 YAVG を集計、全フレーム平均を返す。
+    値範囲: 0 (完全静止) 〜 ~30 (激しいアクション)。
+    解釈: 「フレーム間で平均何 % のピクセルが動いたか」に相当。
+
+    fail-open 設計: 計算失敗時は inf を返して必ず通過させる
+    (motion check は補助フィルタなので、ffmpeg 側の事故で投稿が止まらないようにする)。
+    """
+    try:
+        res = subprocess.run(
+            [
+                "ffmpeg", "-nostats", "-loglevel", "info",
+                "-i", str(clip_path),
+                "-vf", "tblend=all_mode=difference,signalstats",
+                "-f", "null", "-",
+            ],
+            capture_output=True, text=True, encoding="utf-8",
+        )
+    except Exception as exc:
+        print(f"[make] WARNING: motion score 計算で例外 ({exc})。fail-open で通過。")
+        return float("inf")
+
+    yavg_sum = 0.0
+    yavg_count = 0
+    for line in (res.stderr or "").splitlines():
+        if "lavfi.signalstats.YAVG=" in line:
+            try:
+                token = line.split("YAVG=")[1].split()[0]
+                yavg_sum += float(token)
+                yavg_count += 1
+            except (ValueError, IndexError):
+                continue
+
+    if yavg_count == 0:
+        print("[make] WARNING: motion score: YAVG が 1 件も取れず。fail-open で通過。")
+        return float("inf")
+    return yavg_sum / yavg_count
+
+
+def append_rejected_log(record: dict[str, Any]) -> None:
+    """logs/video_rejected.jsonl に却下情報を追記する (運用診断・閾値チューニング用)。
+
+    select_video.py の video_selected.jsonl と分離: あちらは「次回除外する ID 集合」、
+    こちらは「なぜ却下したか」の観察ログ。互いに独立で、次回選定には影響しない。
+    """
+    LOGS_DIR.mkdir(parents=True, exist_ok=True)
+    with REJECTED_LOG_PATH.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    print(f"[make] 却下ログ追記: {REJECTED_LOG_PATH}")
 
 
 @retry(
@@ -626,6 +688,33 @@ def main() -> int:
     except Exception as exc:
         print(f"[make] FATAL: clip 切り出し失敗: {exc}")
         return 3
+
+    # 2.5. 動きスコア却下 (cut_clip 直後、VOICEVOX 合成前に判定して時間節約)
+    # 閾値未満は当該回の処理を中止し、cron 次回起動時に video_selected.jsonl で
+    # 自動的に別動画が選ばれる仕組みに任せる (方針 B)。
+    motion_score = compute_motion_score(clip_path)
+    print(
+        f"[make] motion score: {motion_score:.3f} "
+        f"(threshold={MOTION_SCORE_THRESHOLD}, fail-open at inf)"
+    )
+    if motion_score < MOTION_SCORE_THRESHOLD:
+        append_rejected_log({
+            "rejected_at": datetime.now(timezone.utc).isoformat(),
+            "video_id": meta.get("video_id"),
+            "reason": "low_motion",
+            "motion_score": motion_score,
+            "threshold": MOTION_SCORE_THRESHOLD,
+            "page_url": meta.get("page_url"),
+            "media_url": meta.get("media_url"),
+            "source_name": meta.get("source_name"),
+            "source_type": meta.get("source_type"),
+            "original_title": meta.get("original_title"),
+        })
+        print(
+            f"[make] 動きが少ない ({motion_score:.3f} < {MOTION_SCORE_THRESHOLD}) "
+            f"ため当該回スキップ。cron 次回が別動画を選ぶ。"
+        )
+        return 12
 
     # 3. 全シーンの VOICEVOX 合成 (第1ループ)
     # 各シーンの音声 wav と継続時間を先に全部確定させ、合計 = 総尺を計算する。

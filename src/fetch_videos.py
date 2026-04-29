@@ -56,8 +56,14 @@ def fetch_pixabay(
     per_query: int,
     timeout: int,
     min_duration: int,
+    min_width: int,
 ) -> list[dict[str, Any]]:
-    """Pixabay Video API から候補を取得する。"""
+    """Pixabay Video API から候補を取得する。
+
+    Pixabay API は min_width/min_height パラメータをサポートしているので
+    API 段階で低解像度素材を弾く。さらに取得後にも duration / 各 size の
+    実 width をチェックして 1080x1920 縦化に耐える素材のみ残す。
+    """
     if not PIXABAY_API_KEY:
         print(f"[fetch] WARNING: PIXABAY_API_KEY 未設定。{source_name} スキップ")
         return []
@@ -70,6 +76,8 @@ def fetch_pixabay(
             "video_type": "film",
             "per_page": per_query,
             "safesearch": "true",
+            # API 直接フィルタ: 縦動画 1080 幅に耐える素材のみ
+            "min_width": min_width,
         }
         try:
             r = requests.get(
@@ -89,11 +97,18 @@ def fetch_pixabay(
                 continue
             videos = hit.get("videos", {}) or {}
             # 優先順: large > medium > small > tiny
+            # 各 size には width/height が含まれるので、min_width を満たす最小 size を選ぶ
             media_url = ""
+            chosen_w = 0
             for size in ("large", "medium", "small", "tiny"):
                 v = videos.get(size, {})
-                if isinstance(v, dict) and v.get("url"):
-                    media_url = v["url"]
+                if not isinstance(v, dict):
+                    continue
+                v_url = v.get("url")
+                v_w = int(v.get("width") or 0)
+                if v_url and v_w >= min_width:
+                    media_url = v_url
+                    chosen_w = v_w
                     break
             if not media_url:
                 continue
@@ -105,6 +120,7 @@ def fetch_pixabay(
                 "page_url": hit.get("pageURL", f"https://pixabay.com/videos/id-{vid}/"),
                 "media_url": media_url,
                 "duration": duration,
+                "width": chosen_w,
                 "published_at": None,
                 "source_name": source_name,
                 "source_type": "pixabay",
@@ -129,8 +145,15 @@ def fetch_pexels(
     per_query: int,
     timeout: int,
     min_duration: int,
+    min_width: int,
 ) -> list[dict[str, Any]]:
-    """Pexels Video API から候補を取得する。"""
+    """Pexels Video API から候補を取得する。
+
+    Pexels API は size パラメータで `large` (4K)/`medium` (FullHD)/`small` (HD)
+    を切替可能。size=large を指定して取得し、video_files の中から
+    min_width 以上 & 1440p 以下を選ぶ (極端な 4K は避ける、CDN 帯域節約)。
+    duration / width 両方を取得後にも検証して品質を担保。
+    """
     if not PEXELS_API_KEY:
         print(f"[fetch] WARNING: PEXELS_API_KEY 未設定。{source_name} スキップ")
         return []
@@ -138,7 +161,13 @@ def fetch_pexels(
     headers = {**DEFAULT_HEADERS, "Authorization": PEXELS_API_KEY}
     results: list[dict[str, Any]] = []
     for q in queries:
-        params = {"query": q, "per_page": per_query, "size": "medium"}
+        params = {
+            "query": q,
+            "per_page": per_query,
+            # size=large は 4K 含む高解像度を返す。FullHD 以上が欲しいので large を指定し、
+            # video_files の中から min_width 以上 & 1440p 以下を pick する
+            "size": "large",
+        }
         try:
             r = requests.get(
                 "https://api.pexels.com/videos/search",
@@ -155,24 +184,29 @@ def fetch_pexels(
             duration = int(vid.get("duration", 0))
             if duration < min_duration:
                 continue
-            # video_files から hd 1080p / 720p の mp4 を優先
+            # video_files から min_width を満たす最高品質 (ただし 1440p 以下) を選ぶ
             files = vid.get("video_files", []) or []
 
             def quality_key(f: dict[str, Any]) -> tuple[int, int]:
-                # h = 高解像度を優先しつつ、極端に大きい 4K は避ける
+                # 4K 等は最後に回し、min_width〜1440p を優先
                 h = int(f.get("height") or 0)
                 if h > 1440:
-                    return (0, h)  # 4K等は最後
+                    return (0, h)
                 return (1, h)
 
             mp4_files = [
                 f for f in files
-                if (f.get("file_type") == "video/mp4") and f.get("link")
+                if (f.get("file_type") == "video/mp4")
+                and f.get("link")
+                and int(f.get("width") or 0) >= min_width
             ]
             mp4_files.sort(key=quality_key, reverse=True)
             if not mp4_files:
+                # min_width を満たすファイルが video_files に無い → スキップ
                 continue
-            media_url = mp4_files[0]["link"]
+            chosen = mp4_files[0]
+            media_url = chosen["link"]
+            chosen_w = int(chosen.get("width") or 0)
             user = (vid.get("user") or {}).get("name", "Pexels user")
             results.append({
                 "video_id": f"pexels_{vid.get('id')}",
@@ -182,6 +216,7 @@ def fetch_pexels(
                 "page_url": vid.get("url", ""),
                 "media_url": media_url,
                 "duration": duration,
+                "width": chosen_w,
                 "published_at": None,
                 "source_name": source_name,
                 "source_type": "pexels",
@@ -465,7 +500,8 @@ def main() -> int:
     fetch_cfg = config.get("fetch", {}) or {}
     per_query: int = int(fetch_cfg.get("per_query_results", 6))
     timeout: int = int(fetch_cfg.get("request_timeout", 30))
-    min_duration: int = int(fetch_cfg.get("min_duration", 5))
+    min_duration: int = int(fetch_cfg.get("min_duration", 15))
+    min_width: int = int(fetch_cfg.get("min_width", 1080))
 
     all_videos: list[dict[str, Any]] = []
     for src in config.get("sources", []):
@@ -481,12 +517,12 @@ def main() -> int:
             if src_type == "pixabay":
                 got = fetch_pixabay(
                     queries, weight, authority, license_name, name,
-                    per_query, timeout, min_duration,
+                    per_query, timeout, min_duration, min_width,
                 )
             elif src_type == "pexels":
                 got = fetch_pexels(
                     queries, weight, authority, license_name, name,
-                    per_query, timeout, min_duration,
+                    per_query, timeout, min_duration, min_width,
                 )
             elif src_type == "nasa":
                 got = fetch_nasa(
