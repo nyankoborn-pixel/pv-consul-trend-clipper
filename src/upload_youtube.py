@@ -23,6 +23,12 @@ from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaFileUpload
+from tenacity import (
+    retry,
+    retry_if_exception,
+    stop_after_attempt,
+    wait_exponential,
+)
 
 ROOT = Path(__file__).resolve().parent.parent
 WORK_DIR = ROOT / "work"
@@ -121,6 +127,44 @@ def append_log(path: Path, record: dict[str, Any]) -> None:
         f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
+def _is_youtube_transient(exc: BaseException) -> bool:
+    """YouTube API の HttpError から transient (5xx / 408 / 429) のみ True。
+
+    403 (quotaExceeded) や 401 (auth) はリトライしても無駄なので False。
+    """
+    if isinstance(exc, HttpError):
+        status = exc.resp.status if hasattr(exc, "resp") else 0
+        return status >= 500 or status in (408, 429)
+    return False
+
+
+def _yt_retry_log(retry_state):
+    """tenacity の before_sleep ハンドラ ([upload] プレフィックス)。"""
+    fn = retry_state.fn.__name__ if retry_state.fn else "?"
+    exc = retry_state.outcome.exception() if retry_state.outcome else None
+    next_wait = retry_state.next_action.sleep if retry_state.next_action else 0
+    print(
+        f"[upload] WARNING: {fn}() attempt {retry_state.attempt_number} 失敗 "
+        f"({exc.__class__.__name__}: {exc}) → {next_wait:.1f}s 待って再試行"
+    )
+
+
+@retry(
+    stop=stop_after_attempt(6),
+    wait=wait_exponential(multiplier=2, min=4, max=60),
+    retry=retry_if_exception(_is_youtube_transient),
+    before_sleep=_yt_retry_log,
+    reraise=True,
+)
+def _upload_next_chunk(request):
+    """resumable upload のチャンク 1 つを進める (5xx / 429 で最大 6 回リトライ)。
+
+    YouTube の resumable upload は失敗チャンクから自動再送できる仕組み。
+    積極リトライで quota 内の transient 失敗を吸収する。
+    """
+    return request.next_chunk()
+
+
 def upload(script: dict[str, Any]) -> str:
     """YouTube に動画をアップロードする。
 
@@ -158,16 +202,15 @@ def upload(script: dict[str, Any]) -> str:
     )
     request = youtube.videos().insert(part="snippet,status", body=body, media_body=media)
 
+    # チャンクループ。各 next_chunk() は tenacity で 5xx/429 を最大 6 回リトライする。
+    # 4xx (quotaExceeded / auth エラー) は _is_youtube_transient が False を返し
+    # リトライされず即上位に伝播する。
     response = None
     while response is None:
-        try:
-            status, response = request.next_chunk()
-            if status:
-                pct = int(status.progress() * 100)
-                print(f"[upload] 進捗: {pct}%")
-        except HttpError as exc:
-            print(f"[upload] FATAL: HttpError: {exc}")
-            raise
+        status, response = _upload_next_chunk(request)
+        if status:
+            pct = int(status.progress() * 100)
+            print(f"[upload] 進捗: {pct}%")
 
     posted_id = response.get("id", "")
     print(f"[upload] 完了: https://www.youtube.com/watch?v={posted_id}")

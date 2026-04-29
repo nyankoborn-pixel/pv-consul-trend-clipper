@@ -28,6 +28,12 @@ from pathlib import Path
 from typing import Any
 
 import requests
+from tenacity import (
+    retry,
+    retry_if_exception,
+    stop_after_attempt,
+    wait_exponential,
+)
 
 ROOT = Path(__file__).resolve().parent.parent
 WORK_DIR = ROOT / "work"
@@ -97,6 +103,34 @@ FONT_CANDIDATES = [
 ]
 
 
+# ----- リトライ共通ヘルパー (tenacity) ------------------------------------
+def _is_transient_http_error(exc: BaseException) -> bool:
+    """HTTP 系の transient error かを判定。
+
+    リトライ対象: 5xx / 408 / 429、および接続途中の RequestException。
+    リトライしない: 4xx (auth/quota/構文 — リトライしても直らない)。
+    """
+    if isinstance(exc, requests.HTTPError):
+        if exc.response is None:
+            return True  # 接続途中で response が取れない = transient 扱い
+        status = exc.response.status_code
+        return status >= 500 or status in (408, 429)
+    return isinstance(exc, requests.RequestException)
+
+
+def _make_retry_log(prefix: str):
+    """tenacity の before_sleep ハンドラを既存の print スタイルで生成する。"""
+    def _hook(retry_state):
+        fn = retry_state.fn.__name__ if retry_state.fn else "?"
+        exc = retry_state.outcome.exception() if retry_state.outcome else None
+        next_wait = retry_state.next_action.sleep if retry_state.next_action else 0
+        print(
+            f"{prefix} WARNING: {fn}() attempt {retry_state.attempt_number} 失敗 "
+            f"({exc.__class__.__name__}: {exc}) → {next_wait:.1f}s 待って再試行"
+        )
+    return _hook
+
+
 def resolve_font_path() -> str:
     """日本語フォントの実体パスを解決する。"""
     env_path = os.environ.get("FONT_PATH", "").strip()
@@ -164,8 +198,15 @@ def ffprobe_dim(path: Path) -> str:
         return "?x?"
 
 
+@retry(
+    stop=stop_after_attempt(4),
+    wait=wait_exponential(multiplier=2, min=2, max=30),
+    retry=retry_if_exception(_is_transient_http_error),
+    before_sleep=_make_retry_log("[make]"),
+    reraise=True,
+)
 def download_video(url: str, dest: Path) -> Path:
-    """media_url を requests ストリームで保存する。"""
+    """media_url を requests ストリームで保存する (transient 5xx は最大 4 回リトライ)。"""
     print(f"[make] HTTP ダウンロード: {url}")
     dest.parent.mkdir(parents=True, exist_ok=True)
     try:
@@ -299,8 +340,15 @@ def render_bg(clip_path: Path, total_duration: float, dest: Path) -> Path:
     return dest
 
 
+@retry(
+    stop=stop_after_attempt(4),
+    wait=wait_exponential(multiplier=1, min=1, max=10),
+    retry=retry_if_exception(_is_transient_http_error),
+    before_sleep=_make_retry_log("[make]"),
+    reraise=True,
+)
 def voicevox_synthesize(text: str, speaker_id: int, dest: Path) -> Path:
-    """VOICEVOX HTTP API で音声合成する。"""
+    """VOICEVOX HTTP API で音声合成する (起動直後の接続失敗を最大 4 回リトライ)。"""
     print(f"[make] VOICEVOX 合成 speaker={speaker_id}: {text[:30]}")
     q = requests.post(
         f"{VOICEVOX_URL}/audio_query",
@@ -489,14 +537,22 @@ def mix_bgm(input_video: Path, dest: Path, total_duration: float) -> Path:
         shutil.copy(input_video, dest)
         return dest
 
-    # amix は全入力のサンプルレート一致が前提。
-    # 出力に -ar 48000 を指定しているが、amix 直前で両入力を明示的に 48kHz へ
-    # aresample しないと内部 rate 不一致で BGM が途切れ途切れになる。
-    # (presentation.mp4 audio = 48kHz、bgm.mp3 = 44.1kHz が典型)
+    # voice ducking + BGM mix:
+    # 1. voice (presentation の音声) を asplit で 2 系統に分岐
+    #    - voice_main: amix の入力としてそのまま流す
+    #    - voice_sc: sidechaincompress の trigger として参照
+    # 2. BGM を BGM_VOLUME_DB に pre-attenuate
+    # 3. sidechaincompress: voice_sc が threshold (-26dB) を超えると BGM を 4:1 圧縮
+    #    voice 中は BGM が約 -10dB 追加で減衰、声の聞き取りやすさを向上
+    #    attack=20ms / release=400ms でポンピング (BGM の急激な変動) を防ぐ
+    # 4. voice_main と ducked BGM を amix
+    # aresample=48000 は両入力の rate 一致 (sidechain 必須要件 + 音切れ防止) も兼ねる。
     filter_complex = (
-        f"[0:a]aresample=48000[a0];"
-        f"[1:a]aresample=48000,volume={BGM_VOLUME_DB}dB[bgm];"
-        f"[a0][bgm]amix=inputs=2:duration=first:dropout_transition=0[a]"
+        f"[0:a]aresample=48000,asplit=2[voice_main][voice_sc];"
+        f"[1:a]aresample=48000,volume={BGM_VOLUME_DB}dB[bgm_pre];"
+        f"[bgm_pre][voice_sc]sidechaincompress="
+        f"threshold=0.05:ratio=4:attack=20:release=400:makeup=1[bgm_ducked];"
+        f"[voice_main][bgm_ducked]amix=inputs=2:duration=first:dropout_transition=0[a]"
     )
     run(
         [

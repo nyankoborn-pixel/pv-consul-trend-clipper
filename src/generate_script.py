@@ -19,11 +19,16 @@ import os
 import random
 import re
 import sys
-import time
 from pathlib import Path
 from typing import Any
 
 from google import genai
+from tenacity import (
+    retry,
+    retry_if_exception,
+    stop_after_attempt,
+    wait_exponential,
+)
 
 ROOT = Path(__file__).resolve().parent.parent
 WORK_DIR = ROOT / "work"
@@ -193,27 +198,59 @@ JSON のみを出力してください。
 """
 
 
-def _is_transient_error(exc: Exception) -> bool:
-    """503 UNAVAILABLE / 429 RESOURCE_EXHAUSTED など一時的なエラーを判定する。"""
+def _is_transient_error(exc: BaseException) -> bool:
+    """503 UNAVAILABLE / 429 RESOURCE_EXHAUSTED など一時的なエラーを判定する。
+
+    404 / NOT_FOUND は transient ではない (モデルそのものが無いのでリトライ無意味)。
+    """
     s = str(exc)
+    if any(m in s for m in ("404", "NOT_FOUND", "no longer available")):
+        return False
     return any(
         marker in s
         for marker in ("503", "UNAVAILABLE", "429", "RESOURCE_EXHAUSTED", "DEADLINE_EXCEEDED")
     )
 
 
-def _is_model_gone(exc: Exception) -> bool:
+def _is_model_gone(exc: BaseException) -> bool:
     """404 NOT_FOUND など『そのモデルは使えない』系エラーを判定する。"""
     s = str(exc)
     return ("404" in s and "NOT_FOUND" in s) or "no longer available" in s
+
+
+def _gemini_retry_log(retry_state):
+    """tenacity の before_sleep ハンドラ ([script] プレフィックスで warn)。"""
+    fn = retry_state.fn.__name__ if retry_state.fn else "?"
+    exc = retry_state.outcome.exception() if retry_state.outcome else None
+    next_wait = retry_state.next_action.sleep if retry_state.next_action else 0
+    print(
+        f"[script] WARNING: {fn}() attempt {retry_state.attempt_number} 失敗 "
+        f"({exc.__class__.__name__}: {exc}) → {next_wait:.1f}s 待って再試行"
+    )
+
+
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=2, min=2, max=10),
+    retry=retry_if_exception(_is_transient_error),
+    before_sleep=_gemini_retry_log,
+    reraise=True,
+)
+def _generate_with_model(client, model_name: str, prompt: str) -> str:
+    """単一モデルでの生成 (transient error は tenacity でリトライ、404 は即 raise)。"""
+    resp = client.models.generate_content(
+        model=model_name,
+        contents=prompt,
+    )
+    return (resp.text or "").strip()
 
 
 def call_gemini(prompt: str) -> str:
     """Gemini API を呼び出してレスポンステキストを返す。
 
     新 SDK (google-genai) を使用。
-    - 503 / 429 / DEADLINE_EXCEEDED は同一モデルで指数バックオフ最大3回リトライ
-    - 404 NOT_FOUND は次のフォールバックモデルへ即座に移る
+    - 503 / 429 / DEADLINE_EXCEEDED は tenacity が同一モデルで最大 3 回リトライ
+    - 404 NOT_FOUND は即座に次のフォールバックモデルへ移る (本関数の外側ループ)
     - フォールバック順: env GEMINI_MODEL → 2.5-flash → 2.5-flash-lite → 2.5-pro
       旧 1.5-flash / 2.0-flash は新規ユーザーに非提供になっているため除外。
     """
@@ -234,33 +271,21 @@ def call_gemini(prompt: str) -> str:
 
     last_exc: Exception | None = None
     for model_name in tried:
-        for attempt in range(1, 4):  # 同一モデル最大3回
-            try:
-                print(f"[script] Gemini ({model_name}) 呼び出し attempt={attempt} ...")
-                resp = client.models.generate_content(
-                    model=model_name,
-                    contents=prompt,
-                )
-                text = (resp.text or "").strip()
-                if text:
-                    return text
-                print(f"[script] WARNING: {model_name} attempt={attempt} 空応答。")
-                last_exc = RuntimeError(f"{model_name} returned empty text")
-            except Exception as exc:
-                last_exc = exc
-                if _is_model_gone(exc):
-                    print(f"[script] {model_name} は使用不可 (404)。次候補へ。")
-                    break  # 次のモデルへ
-                if _is_transient_error(exc) and attempt < 3:
-                    backoff = 2 ** attempt  # 2s, 4s
-                    print(
-                        f"[script] WARNING: {model_name} attempt={attempt} 一時失敗 "
-                        f"({exc.__class__.__name__})。{backoff}s 待って再試行。"
-                    )
-                    time.sleep(backoff)
-                    continue
-                print(f"[script] WARNING: {model_name} attempt={attempt} 失敗: {exc}")
-                break  # その他エラー or 最終 attempt → 次のモデルへ
+        try:
+            print(f"[script] Gemini ({model_name}) 呼び出し ...")
+            text = _generate_with_model(client, model_name, prompt)
+            if text:
+                return text
+            print(f"[script] WARNING: {model_name} 空応答、次候補へ。")
+            last_exc = RuntimeError(f"{model_name} returned empty text")
+        except Exception as exc:
+            last_exc = exc
+            if _is_model_gone(exc):
+                print(f"[script] {model_name} は使用不可 (404)、次候補へ。")
+            else:
+                # tenacity の retry を使い切った後の最終失敗
+                print(f"[script] WARNING: {model_name} 最終失敗: {exc}")
+            continue
     if last_exc:
         raise last_exc
     raise RuntimeError("Gemini が全候補モデルで応答なし")
