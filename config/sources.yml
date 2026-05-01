@@ -50,6 +50,12 @@ sources:
       - "rapids whitewater"
       - "strong wind"
       - "waterfall powerful"
+      # CN keywords trial (dry-run 観察用、評価後に取捨選択)
+      - "动物搞笑视频"
+      - "爆笑动物"
+      - "仓鼠搞笑"
+      - "搞笑动物合集"
+      - "野生动物 猎杀集锦"
     weight: 8
     authority_intro: "Pexelsで公開されているフリー素材映像"
     license: "Pexels License"
