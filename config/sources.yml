@@ -50,6 +50,12 @@ sources:
       - "rapids whitewater"
       - "strong wind"
       - "waterfall powerful"
+      # CN 動物系キーワード (Pexels の中国語 alias 経由でヒット可能、Web確認済み)
+      - "动物搞笑视频"
+      - "爆笑动物"
+      - "仓鼠搞笑"
+      - "搞笑动物合集"
+      - "野生动物 猎杀集锦"
     weight: 8
     authority_intro: "Pexelsで公開されているフリー素材映像"
     license: "Pexels License"
