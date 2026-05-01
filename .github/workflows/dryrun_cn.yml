@@ -1,0 +1,75 @@
+name: Dry-run CN keywords (Pexels)
+
+# 中国語キーワード 5 種を Pexels に投げ、何が引けるかを Markdown サマリで観察するための
+# 単独ワークフロー。production の auto_post.yml には影響しない。
+# workflow_dispatch のみ。手動で 1 回回す → logs/dryrun_cn_keywords.md がコミットされる
+# → GitHub の Web で結果を確認する流れ。
+
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  dryrun:
+    name: Fetch CN keywords and summarize
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    env:
+      PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
+      PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
+      NASA_API_KEY: ${{ secrets.NASA_API_KEY }}
+      PYTHONUNBUFFERED: "1"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install Python deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Step 1 — fetch_videos (全ソース)
+        run: python src/fetch_videos.py
+
+      - name: Step 2 — summarize CN keywords
+        run: python scripts/summarize_dryrun.py
+
+      - name: Upload candidates.json artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dryrun-candidates-${{ github.run_id }}
+          path: |
+            work/candidates.json
+            logs/dryrun_cn_keywords.md
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Commit summary markdown
+        if: success()
+        run: |
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name  "github-actions[bot]"
+          if [ -f logs/dryrun_cn_keywords.md ]; then
+            git add logs/dryrun_cn_keywords.md
+            if ! git diff --cached --quiet; then
+              git commit -m "chore(dryrun): refresh CN keywords summary $(date -u +%Y-%m-%dT%H:%M:%SZ) [skip ci]"
+              git push
+            else
+              echo "No changes to summary."
+            fi
+          else
+            echo "summary file not produced; skipping commit."
+          fi
