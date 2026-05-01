@@ -128,6 +128,7 @@ def fetch_pixabay(
                 "license": license_name,
                 "weight": weight,
                 "uploader": hit.get("user", "Pixabay user"),
+                "_query": q,
             })
         print(f"[fetch] Pixabay q='{q}': 累計 {len(results)} 件")
     return results
@@ -224,6 +225,7 @@ def fetch_pexels(
                 "license": license_name,
                 "weight": weight,
                 "uploader": user,
+                "_query": q,
             })
         print(f"[fetch] Pexels q='{q}': 累計 {len(results)} 件")
     return results
@@ -311,6 +313,7 @@ def fetch_nasa(
                 "license": license_name,
                 "weight": weight,
                 "uploader": data.get("center", "NASA"),
+                "_query": q,
             })
         print(f"[fetch] NASA q='{q}': 累計 {len(results)} 件")
     return results
@@ -374,6 +377,7 @@ def fetch_usgs_volcano(
                 "license": license_name,
                 "weight": weight,
                 "uploader": "USGS",
+                "_query": "(scrape)",
             })
     print(f"[fetch] USGS Volcano: 抽出 {len(found)} 件 (best-effort)")
     return found
@@ -467,6 +471,7 @@ def fetch_internet_archive(
                 "license": license_name,
                 "weight": weight,
                 "uploader": "Internet Archive",
+                "_query": q,
             })
         print(f"[fetch] Internet Archive q='{q}': 累計 {len(results)} 件")
     return results
